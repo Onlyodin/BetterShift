@@ -35,7 +35,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ColorPicker } from "@/components/ui/color-picker";
 import { ShiftPreset } from "@/lib/db/schema";
 import { PRESET_COLORS } from "@/lib/constants";
-import { Plus, Trash2, Edit2, Loader2, GripVertical } from "lucide-react";
+import {
+  Plus,
+  Trash2,
+  Edit2,
+  Loader2,
+  GripVertical,
+  Copy,
+} from "lucide-react";
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog";
 import { ReadOnlyBanner } from "@/components/read-only-banner";
 import { useDirtyState } from "@/hooks/useDirtyState";
@@ -67,6 +74,7 @@ interface SortablePresetItemProps {
   preset: ShiftPreset;
   isDeleting: boolean;
   onEdit: (preset: ShiftPreset) => void;
+  onClone: (preset: ShiftPreset) => void;
   onDelete: (id: string) => void;
   t: (key: string) => string;
   showDragHandle?: boolean;
@@ -77,6 +85,7 @@ const SortablePresetItem = memo(function SortablePresetItem({
   preset,
   isDeleting,
   onEdit,
+  onClone,
   onDelete,
   t,
   showDragHandle = true,
@@ -148,6 +157,16 @@ const SortablePresetItem = memo(function SortablePresetItem({
         <div className="flex gap-1 shrink-0">
           {!isReadOnly && (
             <>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={() => onClone(preset)}
+                disabled={isDeleting}
+                title={t("common.copy")}
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
               <Button
                 size="icon"
                 variant="ghost"
@@ -374,6 +393,27 @@ export function PresetManageSheet({
     }
   };
 
+  const clonePreset = async (preset: ShiftPreset) => {
+    if (isReadOnly || !calendarId || isLoading) return;
+
+    const clonedFormData: PresetFormData = {
+      title: `${preset.title} (${t("common.copy")})`,
+      startTime: preset.startTime,
+      endTime: preset.endTime,
+      color: preset.color,
+      notes: preset.notes || "",
+      isSecondary: preset.isSecondary || false,
+      isAllDay: preset.isAllDay || false,
+      hideFromStats: preset.hideFromStats || false,
+    };
+
+    const success = await createPresetMutation(clonedFormData);
+    if (success) {
+      setShowAddForm(false);
+      setEditingPreset(null);
+    }
+  };
+
   const startEdit = (preset: ShiftPreset) => {
     const editFormData = {
       title: preset.title,
@@ -529,6 +569,7 @@ export function PresetManageSheet({
                             preset={preset}
                             isDeleting={isDeleting === preset.id}
                             onEdit={startEdit}
+                            onClone={clonePreset}
                             onDelete={handleDeleteClick}
                             t={t}
                             showDragHandle={orderedPrimaryPresets.length > 1}
@@ -565,6 +606,7 @@ export function PresetManageSheet({
                             preset={preset}
                             isDeleting={isDeleting === preset.id}
                             onEdit={startEdit}
+                            onClone={clonePreset}
                             onDelete={handleDeleteClick}
                             t={t}
                             showDragHandle={orderedSecondaryPresets.length > 1}
@@ -584,6 +626,7 @@ export function PresetManageSheet({
                   preset={editingPreset}
                   isDeleting={isDeleting === editingPreset.id}
                   onEdit={startEdit}
+                  onClone={clonePreset}
                   onDelete={handleDeleteClick}
                   t={t}
                   showDragHandle={false}

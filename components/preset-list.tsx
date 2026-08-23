@@ -20,7 +20,8 @@ interface PresetListProps {
   calendarId: string;
   presets: ShiftPreset[];
   selectedPresetId?: string;
-  onSelectPreset: (presetId: string | undefined) => void;
+  selectedPresetIds?: string[];
+  onSelectPreset: (presetId: string | undefined, multiSelect?: boolean) => void;
   onCreateNew?: () => void;
   onManageClick?: () => void;
   onViewSettingsClick?: () => void;
@@ -33,6 +34,7 @@ export function PresetList({
   calendarId,
   presets,
   selectedPresetId,
+  selectedPresetIds,
   onSelectPreset,
   onManageClick,
   onViewSettingsClick,
@@ -44,8 +46,30 @@ export function PresetList({
   const permission = useCalendarPermission(calendarId);
   const [showSecondary, setShowSecondary] = React.useState(false);
 
+  const activePresetIds = new Set(
+    selectedPresetIds && selectedPresetIds.length > 0
+      ? selectedPresetIds
+      : selectedPresetId
+        ? [selectedPresetId]
+        : []
+  );
   const primaryPresets = presets.filter((p) => !p.isSecondary);
   const secondaryPresets = presets.filter((p) => p.isSecondary);
+
+  const handlePresetToggle = (
+    presetId: string,
+    event?: React.MouseEvent<HTMLButtonElement>
+  ) => {
+    const multiSelect =
+      !!event && (event.metaKey || event.ctrlKey || event.shiftKey);
+
+    if (multiSelect) {
+      onSelectPreset(presetId, true);
+      return;
+    }
+
+    onSelectPreset(activePresetIds.has(presetId) ? undefined : presetId, false);
+  };
 
   // Check if current calendar is read-only
   const isReadOnly = !permission.canEdit;
@@ -91,12 +115,8 @@ export function PresetList({
             <PresetButton
               key={preset.id}
               preset={preset}
-              isSelected={selectedPresetId === preset.id}
-              onSelect={() =>
-                onSelectPreset(
-                  selectedPresetId === preset.id ? undefined : preset.id
-                )
-              }
+              isSelected={activePresetIds.has(preset.id)}
+              onSelect={(event) => handlePresetToggle(preset.id, event)}
               isReadOnly={isReadOnly}
             />
           ))}
@@ -127,12 +147,8 @@ export function PresetList({
                 <PresetButton
                   key={preset.id}
                   preset={preset}
-                  isSelected={selectedPresetId === preset.id}
-                  onSelect={() =>
-                    onSelectPreset(
-                      selectedPresetId === preset.id ? undefined : preset.id
-                    )
-                  }
+                  isSelected={activePresetIds.has(preset.id)}
+                  onSelect={(event) => handlePresetToggle(preset.id, event)}
                   compact
                   isReadOnly={isReadOnly}
                 />
@@ -195,7 +211,7 @@ export function PresetList({
 interface PresetButtonProps {
   preset: ShiftPreset;
   isSelected: boolean;
-  onSelect: () => void;
+  onSelect: (event?: React.MouseEvent<HTMLButtonElement>) => void;
   compact?: boolean;
   isReadOnly?: boolean;
 }
@@ -214,7 +230,7 @@ function PresetButton({
       <Button
         variant={isSelected ? "default" : "outline"}
         size="sm"
-        onClick={isReadOnly ? undefined : onSelect}
+        onClick={isReadOnly ? undefined : (event) => onSelect(event)}
         disabled={isReadOnly}
         className="relative text-xs sm:text-sm px-2 sm:px-3 h-8 sm:h-9"
         style={{
@@ -251,7 +267,7 @@ function PresetButton({
       <Button
         variant={isSelected ? "default" : "outline"}
         size="sm"
-        onClick={isReadOnly ? undefined : onSelect}
+        onClick={isReadOnly ? undefined : (event) => onSelect(event)}
         disabled={isReadOnly}
         className="relative text-[11px] sm:text-sm px-2 sm:px-4 h-8 sm:h-10 rounded-full font-semibold transition-all"
         style={{
