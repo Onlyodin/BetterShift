@@ -932,6 +932,7 @@ function HomeContent() {
           shifts={shifts}
           notes={notes}
           selectedPresetId={selectedPresetId}
+          selectedPresetIds={selectedPresetIds}
           togglingDates={shiftActions.togglingDates}
           externalSyncs={externalSyncs}
           maxShiftsToShow={
