@@ -9,6 +9,7 @@ import {
   Settings2,
   ChevronDown,
   ChevronUp,
+  Tag,
 } from "lucide-react";
 
 import { ShiftPreset } from "@/lib/db/schema";
@@ -56,6 +57,19 @@ export function PresetList({
   const primaryPresets = presets.filter((p) => !p.isSecondary);
   const secondaryPresets = presets.filter((p) => p.isSecondary);
 
+  const groups = React.useMemo(() => {
+    const map = new Map<string, ShiftPreset[]>();
+    for (const preset of presets) {
+      const name = preset.groupName?.trim();
+      if (!name) continue;
+      if (!map.has(name)) map.set(name, []);
+      map.get(name)!.push(preset);
+    }
+    return [...map.entries()]
+      .map(([name, items]) => ({ name, items }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [presets]);
+
   const handlePresetToggle = (
     presetId: string,
     event?: React.MouseEvent<HTMLButtonElement>
@@ -69,6 +83,19 @@ export function PresetList({
     }
 
     onSelectPreset(activePresetIds.has(presetId) ? undefined : presetId, false);
+  };
+
+  // A group chip applies (or removes) every preset in that group at once,
+  // layering on top of whatever is already individually selected: fully
+  // selected -> deselect the whole group, otherwise -> select what's missing.
+  const handleGroupToggle = (groupPresets: ShiftPreset[]) => {
+    const ids = groupPresets.map((p) => p.id);
+    const allSelected = ids.every((id) => activePresetIds.has(id));
+    ids.forEach((id) => {
+      if (allSelected || !activePresetIds.has(id)) {
+        onSelectPreset(id, true);
+      }
+    });
   };
 
   // Check if current calendar is read-only
@@ -120,6 +147,43 @@ export function PresetList({
               isReadOnly={isReadOnly}
             />
           ))}
+        </div>
+      )}
+
+      {/* Group Chips - selecting one toggles every preset in that group */}
+      {!hidePresetHeader && groups.length > 0 && (
+        <div className="space-y-1.5">
+          <span className="text-xs text-muted-foreground px-2">
+            {t("preset.groups")}
+          </span>
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+            {groups.map((group) => {
+              const ids = group.items.map((p) => p.id);
+              const isFullySelected = ids.every((id) => activePresetIds.has(id));
+              return (
+                <Button
+                  key={group.name}
+                  variant={isFullySelected ? "default" : "outline"}
+                  size="sm"
+                  onClick={
+                    isReadOnly ? undefined : () => handleGroupToggle(group.items)
+                  }
+                  disabled={isReadOnly}
+                  className="gap-1 text-xs sm:text-sm px-2.5 sm:px-3 h-8 sm:h-9 rounded-full border-dashed"
+                  title={t("preset.selectGroupHint")}
+                >
+                  {isFullySelected ? (
+                    <Check className="h-3 w-3" />
+                  ) : (
+                    <Tag className="h-3 w-3" />
+                  )}
+                  <span className="font-medium truncate max-w-[120px] sm:max-w-none">
+                    {group.name} ({group.items.length})
+                  </span>
+                </Button>
+              );
+            })}
+          </div>
         </div>
       )}
 
