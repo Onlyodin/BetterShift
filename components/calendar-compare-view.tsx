@@ -102,15 +102,13 @@ export function CalendarCompareView(props: CalendarCompareViewProps) {
         ? [props.selectedPresetId]
         : [];
 
-  // Restrict date clicks to the calendar that owns the selected preset(s).
+  // Restrict date clicks to the calendar(s) that own the selected preset(s).
   const selectedPresetCalendarIds = new Set<string>();
   for (const [calendarId, presets] of props.presetsMap.entries()) {
     if (presets.some((preset) => activePresetIds.includes(preset.id))) {
       selectedPresetCalendarIds.add(calendarId);
     }
   }
-  const selectedPresetCalendarId =
-    selectedPresetCalendarIds.size > 0 ? Array.from(selectedPresetCalendarIds)[0] : null;
 
   const handleShareLink = () => {
     const url = new URL(window.location.href);
@@ -206,8 +204,8 @@ export function CalendarCompareView(props: CalendarCompareViewProps) {
 
             // Check if this calendar is disabled (preset from different calendar selected)
             const isDisabled =
-              selectedPresetCalendarId !== null &&
-              selectedPresetCalendarId !== calendar.id;
+              selectedPresetCalendarIds.size > 0 &&
+              !selectedPresetCalendarIds.has(calendar.id);
 
             return (
               <motion.div

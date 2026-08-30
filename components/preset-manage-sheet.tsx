@@ -110,6 +110,7 @@ interface PresetManageSheetProps {
 interface SortablePresetItemProps {
   preset: ShiftPreset;
   isDeleting: boolean;
+  isCloneDisabled?: boolean;
   onEdit: (preset: ShiftPreset) => void;
   onClone: (preset: ShiftPreset) => void;
   onDelete: (id: string) => void;
@@ -121,6 +122,7 @@ interface SortablePresetItemProps {
 const SortablePresetItem = memo(function SortablePresetItem({
   preset,
   isDeleting,
+  isCloneDisabled = false,
   onEdit,
   onClone,
   onDelete,
@@ -199,7 +201,7 @@ const SortablePresetItem = memo(function SortablePresetItem({
                 variant="ghost"
                 className="h-8 w-8"
                 onClick={() => onClone(preset)}
-                disabled={isDeleting}
+                disabled={isDeleting || isCloneDisabled}
                 title={t("common.copy")}
               >
                 <Copy className="h-4 w-4" />
@@ -243,6 +245,7 @@ interface PresetSectionListProps {
   sensors: ReturnType<typeof useSensors>;
   onDragEnd: (subgroupIds: string[], event: DragEndEvent) => void;
   isDeleting: string | null;
+  isCloneDisabled: boolean;
   onEdit: (preset: ShiftPreset) => void;
   onClone: (preset: ShiftPreset) => void;
   onDelete: (id: string) => void;
@@ -256,6 +259,7 @@ function PresetSectionList({
   sensors,
   onDragEnd,
   isDeleting,
+  isCloneDisabled,
   onEdit,
   onClone,
   onDelete,
@@ -279,6 +283,7 @@ function PresetSectionList({
                 key={preset.id}
                 preset={preset}
                 isDeleting={isDeleting === preset.id}
+                isCloneDisabled={isCloneDisabled}
                 onEdit={onEdit}
                 onClone={onClone}
                 onDelete={onDelete}
@@ -500,10 +505,15 @@ export function PresetManageSheet({
       hideFromStats: preset.hideFromStats || false,
     };
 
-    const success = await createPresetMutation(clonedFormData);
-    if (success) {
-      setShowAddForm(false);
-      setEditingPreset(null);
+    setIsLoading(true);
+    try {
+      const success = await createPresetMutation(clonedFormData);
+      if (success) {
+        setShowAddForm(false);
+        setEditingPreset(null);
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -625,6 +635,7 @@ export function PresetManageSheet({
                     handleSectionDragEnd("primary", subgroupIds, event)
                   }
                   isDeleting={isDeleting}
+                  isCloneDisabled={isLoading}
                   onEdit={startEdit}
                   onClone={clonePreset}
                   onDelete={handleDeleteClick}
@@ -645,6 +656,7 @@ export function PresetManageSheet({
                     handleSectionDragEnd("secondary", subgroupIds, event)
                   }
                   isDeleting={isDeleting}
+                  isCloneDisabled={isLoading}
                   onEdit={startEdit}
                   onClone={clonePreset}
                   onDelete={handleDeleteClick}
@@ -659,6 +671,7 @@ export function PresetManageSheet({
                 <SortablePresetItem
                   preset={editingPreset}
                   isDeleting={isDeleting === editingPreset.id}
+                  isCloneDisabled={isLoading}
                   onEdit={startEdit}
                   onClone={clonePreset}
                   onDelete={handleDeleteClick}
