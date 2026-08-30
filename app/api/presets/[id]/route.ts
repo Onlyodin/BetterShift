@@ -75,6 +75,20 @@ export async function PATCH(
       hideFromStats,
     } = body;
 
+    // groupName: undefined leaves it unchanged, null explicitly clears it,
+    // strings are trimmed (empty -> cleared), anything else is invalid input.
+    let normalizedGroupName: string | null | undefined;
+    if (groupName === undefined || groupName === null) {
+      normalizedGroupName = groupName;
+    } else if (typeof groupName === "string") {
+      normalizedGroupName = groupName.trim() || null;
+    } else {
+      return NextResponse.json(
+        { error: "Invalid groupName" },
+        { status: 400 }
+      );
+    }
+
     const user = await getSessionUser(request.headers);
 
     // Fetch preset to get calendar ID
@@ -120,8 +134,7 @@ export async function PATCH(
         endTime: isAllDay ? "23:59" : endTime,
         color,
         notes: notes || null,
-        groupName:
-          groupName !== undefined ? groupName.trim() || null : undefined,
+        groupName: normalizedGroupName,
         isSecondary: isSecondary !== undefined ? isSecondary : undefined,
         isAllDay: isAllDay !== undefined ? isAllDay : undefined,
         hideFromStats: hideFromStats !== undefined ? hideFromStats : undefined,
