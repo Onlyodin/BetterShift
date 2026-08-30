@@ -120,7 +120,8 @@ export async function PATCH(
         endTime: isAllDay ? "23:59" : endTime,
         color,
         notes: notes || null,
-        groupName: groupName?.trim() || null,
+        groupName:
+          groupName !== undefined ? groupName.trim() || null : undefined,
         isSecondary: isSecondary !== undefined ? isSecondary : undefined,
         isAllDay: isAllDay !== undefined ? isAllDay : undefined,
         hideFromStats: hideFromStats !== undefined ? hideFromStats : undefined,
