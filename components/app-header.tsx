@@ -15,7 +15,7 @@ import {
 import { CalendarWithCount } from "@/lib/types";
 import { CalendarSwitcher } from "@/components/calendar-switcher";
 import { GuestMenu, UserMenu } from "@/components/user-menu";
-import { ChangelogDialog } from "@/components/changelog-dialog";
+import { InfoDialog } from "@/components/info-dialog";
 import { useAuth } from "@/hooks/useAuth";
 import { useAuthFeatures } from "@/hooks/useAuthFeatures";
 import { useVersionUpdateCheck } from "@/hooks/useVersionUpdate";
@@ -27,6 +27,8 @@ interface AppHeaderProps {
   selectedCalendar: string | undefined;
   currentDate: Date;
   hasSyncErrors?: boolean;
+  /** Sync notifications manage external syncs — hidden for guests and other non-managers */
+  canManageSync?: boolean;
   onDateChange: (date: Date) => void;
   onSelectCalendar: (id: string) => void;
   onCreateCalendar: () => void;
@@ -142,6 +144,7 @@ export function AppHeader({
   selectedCalendar,
   currentDate,
   hasSyncErrors = false,
+  canManageSync = false,
   onDateChange,
   onSelectCalendar,
   onCreateCalendar,
@@ -172,7 +175,7 @@ export function AppHeader({
 
   const actions = (
     <>
-      {selectedCalendar && (
+      {selectedCalendar && canManageSync && (
         <HeaderIconButton
           label={
             hasSyncErrors
@@ -280,10 +283,11 @@ export function AppHeader({
         )}
       </header>
 
-      <ChangelogDialog
+      <InfoDialog
         open={showChangelog}
         onOpenChange={setShowChangelog}
         locale={locale}
+        defaultTab="changelog"
       />
     </>
   );
