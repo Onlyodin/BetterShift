@@ -17,7 +17,12 @@ import { Button } from "@/components/ui/button";
 import { MonthGrid } from "@/components/month-grid";
 import { MonthArrows, MonthStepper } from "@/components/app-header";
 import { PresetManageSheet } from "@/components/preset-manage-sheet";
-import { MorePresets, orderStampPresets, splitStampPresets } from "@/components/stamp-dock";
+import {
+  MorePresets,
+  MultiSelectToggle,
+  orderStampPresets,
+  splitStampPresets,
+} from "@/components/stamp-dock";
 import { MAX_COMPARE_CALENDARS } from "@/components/calendar-compare-sheet";
 import { useDayLabels } from "@/components/day-inspector";
 import { CalendarWithCount, ShiftWithCalendar } from "@/lib/types";
@@ -38,7 +43,7 @@ import { useCalendarPermission } from "@/hooks/useCalendarPermission";
 import { useConnectionStatus } from "@/hooks/useConnectionStatus";
 import { useStampShortcuts } from "@/hooks/useStampShortcuts";
 import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
-import { cn } from "@/lib/utils";
+import { cn, isMultiSelectClick } from "@/lib/utils";
 
 interface CompareWorkspaceProps {
   calendars: CalendarWithCount[];
@@ -56,8 +61,8 @@ interface CompareWorkspaceProps {
   showShiftNotes: boolean;
   highlightedWeekdays: number[];
   highlightColor: string;
-  selectedPresetId: string | undefined;
-  onSelectPreset: (id: string | undefined) => void;
+  selectedPresetIds: string[];
+  onSelectPreset: (id: string | undefined, multiSelect?: boolean) => void;
   onDayClick: (calendarId: string, date: Date) => void;
   onDayContextMenu: (calendarId: string, date: Date) => void;
   onOpenDayShifts: (date: Date, shifts: ShiftWithCalendar[]) => void;
@@ -91,15 +96,19 @@ export function CompareWorkspace(props: CompareWorkspaceProps) {
   const desktop = useMediaQuery(DESKTOP_QUERY, true);
   const [manageCalendarId, setManageCalendarId] = useState<string | null>(null);
 
-  const presetOwner = useMemo(() => {
-    if (!props.selectedPresetId) return null;
+  const presetOwnerIds = useMemo(() => {
+    const selectedSet = new Set(props.selectedPresetIds);
+    const owners = new Set<string>();
     for (const [calendarId, presets] of props.presetsMap) {
-      if (presets.some((p) => p.id === props.selectedPresetId)) return calendarId;
+      if (presets.some((p) => selectedSet.has(p.id))) {
+        owners.add(calendarId);
+      }
     }
-    return null;
-  }, [props.presetsMap, props.selectedPresetId]);
+    return owners;
+  }, [props.presetsMap, props.selectedPresetIds]);
 
-  const activeColumnId = presetOwner ?? props.calendars[0]?.id;
+  const activeColumnId =
+    props.calendars.find((c) => presetOwnerIds.has(c.id))?.id ?? props.calendars[0]?.id;
   const activePresets = orderStampPresets(props.presetsMap.get(activeColumnId ?? "") ?? []);
 
   // Each column carries its own permission, and only an editable one renders the
@@ -110,7 +119,7 @@ export function CompareWorkspace(props: CompareWorkspaceProps) {
 
   useStampShortcuts({
     presetIds: activePresets.map((p) => p.id),
-    selectedPresetId: props.selectedPresetId,
+    selectedPresetIds: props.selectedPresetIds,
     onSelectPreset: props.onSelectPreset,
     enabled: desktop && canEditActiveColumn && isOnline,
   });
@@ -122,7 +131,7 @@ export function CompareWorkspace(props: CompareWorkspaceProps) {
       {desktop ? (
         <CompareDesktop
           {...props}
-          presetOwner={presetOwner}
+          presetOwnerIds={presetOwnerIds}
           activeColumnId={activeColumnId}
           onManagePresets={setManageCalendarId}
         />
@@ -152,12 +161,12 @@ function CompareDesktop({
   onExit,
   shiftsMap,
   onOpenDayShifts,
-  presetOwner,
+  presetOwnerIds,
   activeColumnId,
   onManagePresets,
   ...rest
 }: CompareWorkspaceProps & {
-  presetOwner: string | null;
+  presetOwnerIds: Set<string>;
   activeColumnId: string | undefined;
   onManagePresets: (calendarId: string) => void;
 }) {
@@ -224,7 +233,7 @@ function CompareDesktop({
             currentDate={currentDate}
             selectedDay={selectedDay}
             shifts={shiftsMap.get(calendar.id) ?? []}
-            stampActive={presetOwner === calendar.id}
+            stampActive={presetOwnerIds.has(calendar.id)}
             keysActive={activeColumnId === calendar.id}
             onManagePresets={() => onManagePresets(calendar.id)}
             {...rest}
@@ -288,7 +297,7 @@ function CompareColumn({
   showShiftNotes,
   highlightedWeekdays,
   highlightColor,
-  selectedPresetId,
+  selectedPresetIds,
   onSelectPreset,
   onDayClick,
   onDayContextMenu,
@@ -314,7 +323,9 @@ function CompareColumn({
   const locale = useLocale();
   const { canEdit } = useCalendarPermission(calendar.id);
   const { primary, secondary } = splitStampPresets(presetsMap.get(calendar.id) ?? []);
+  const activeIds = new Set(selectedPresetIds);
   const totals = monthTotals(shifts, currentDate);
+  const [multiMode, setMultiMode] = useState(false);
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col pb-3">
@@ -336,13 +347,15 @@ function CompareColumn({
           <div className="mt-2.5 flex h-8 items-center gap-1.5 overflow-hidden">
             <div className="flex min-w-0 items-center gap-1.5 overflow-hidden empty:hidden">
               {primary.map((preset, index) => {
-                const active = preset.id === selectedPresetId;
+                const active = activeIds.has(preset.id);
                 return (
                   <button
                     key={preset.id}
                     type="button"
                     aria-pressed={active}
-                    onClick={() => onSelectPreset(active ? undefined : preset.id)}
+                    onClick={(event) =>
+                      onSelectPreset(preset.id, multiMode || isMultiSelectClick(event))
+                    }
                     className={cn(
                       "flex h-7 shrink-0 items-center gap-[7px] rounded-[7px] border px-2.5 text-[12.5px] font-medium transition-colors",
                       active
@@ -364,8 +377,14 @@ function CompareColumn({
             <MorePresets
               variant="compare"
               presets={secondary}
-              selectedPresetId={selectedPresetId}
+              selectedPresetIds={selectedPresetIds}
               onSelectPreset={onSelectPreset}
+              multiMode={multiMode}
+            />
+            <MultiSelectToggle
+              variant="compare"
+              active={multiMode}
+              onClick={() => setMultiMode((m) => !m)}
             />
             <button
               type="button"
