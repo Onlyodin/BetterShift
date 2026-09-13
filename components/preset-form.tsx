@@ -7,6 +7,7 @@ import { CheckRow, ColorSwatches, Field, inputClass } from "@/components/form-ki
 import { ShiftPreset } from "@/lib/db/schema";
 import { DEFAULT_COLOR } from "@/lib/constants";
 import type { PresetFormData } from "@/hooks/usePresets";
+import { useAuthFeatures } from "@/hooks/useAuthFeatures";
 import { cn } from "@/lib/utils";
 
 export const EMPTY_PRESET_FORM: PresetFormData = {
@@ -19,6 +20,7 @@ export const EMPTY_PRESET_FORM: PresetFormData = {
   isSecondary: false,
   isAllDay: false,
   hideFromStats: false,
+  defaultSignupCapacity: null,
 };
 
 export function presetToFormData(preset: ShiftPreset): PresetFormData {
@@ -32,6 +34,7 @@ export function presetToFormData(preset: ShiftPreset): PresetFormData {
     isSecondary: preset.isSecondary || false,
     isAllDay: preset.isAllDay || false,
     hideFromStats: preset.hideFromStats || false,
+    defaultSignupCapacity: preset.defaultSignupCapacity ?? null,
   };
 }
 
@@ -67,6 +70,7 @@ export function PresetFormCard({
 }: PresetFormCardProps) {
   const t = useTranslations();
   const id = useId();
+  const { isAuthEnabled } = useAuthFeatures();
   const fieldClass = cn(inputClass, "bg-surface-card");
 
   return (
@@ -127,7 +131,7 @@ export function PresetFormCard({
         disabled={disabled}
       />
 
-      <Field label={t("form.notesLabel")} htmlFor={`${id}-notes`}>
+      <Field label={t("form.notesLabel")} htmlFor={`${id}-notes`} optional>
         <Input
           id={`${id}-notes`}
           value={value.notes}
@@ -138,7 +142,31 @@ export function PresetFormCard({
         />
       </Field>
 
-      <Field label={t("preset.group")} htmlFor={`${id}-group`}>
+      {isAuthEnabled && (
+        <Field
+          label={t("presetSheet.defaultSignupCapacityLabel")}
+          htmlFor={`${id}-signup-capacity`}
+          hint={t("presetSheet.defaultSignupCapacityHint")}
+          optional
+        >
+          <Input
+            id={`${id}-signup-capacity`}
+            type="number"
+            min={1}
+            inputMode="numeric"
+            value={value.defaultSignupCapacity ?? ""}
+            onChange={(e) =>
+              onChange({
+                defaultSignupCapacity: e.target.value === "" ? null : Number(e.target.value),
+              })
+            }
+            className={fieldClass}
+            disabled={disabled}
+          />
+        </Field>
+      )}
+
+      <Field label={t("preset.group")} htmlFor={`${id}-group`} optional>
         <Input
           id={`${id}-group`}
           list={`${id}-group-names`}
