@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { shiftPresets, shifts, calendars } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { canViewCalendar, canEditCalendar } from "@/lib/auth/permissions";
+import { hasCapability, hasOwnedCapability } from "@/lib/auth/permissions";
 import { trimOrNull } from "@/lib/utils";
 
 // GET single preset
@@ -38,7 +38,11 @@ export async function GET(
     }
 
     // Check read permission (works for both authenticated users and guests)
-    const hasAccess = await canViewCalendar(user?.id, preset.calendarId);
+    const hasAccess = await hasCapability(
+      user?.id,
+      preset.calendarId,
+      "viewShifts"
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -114,9 +118,12 @@ export async function PATCH(
     }
 
     // Check edit permission (works for both authenticated users and guests)
-    const hasAccess = await canEditCalendar(
+    const hasAccess = await hasOwnedCapability(
       user?.id,
-      existingPreset.calendarId
+      existingPreset.calendarId,
+      "manageOwnPresets",
+      "manageAnyPresets",
+      existingPreset.createdBy
     );
     if (!hasAccess) {
       return NextResponse.json(
@@ -158,7 +165,12 @@ export async function PATCH(
         isAllDay: isAllDay !== undefined ? isAllDay : undefined,
         updatedAt: new Date(),
       })
-      .where(eq(shifts.presetId, id));
+      .where(
+        and(
+          eq(shifts.presetId, id),
+          eq(shifts.calendarId, existingPreset.calendarId)
+        )
+      );
 
     return NextResponse.json(updatedPreset);
   } catch (error) {
@@ -203,7 +215,13 @@ export async function DELETE(
     }
 
     // Check edit permission (works for both authenticated users and guests)
-    const hasAccess = await canEditCalendar(user?.id, preset.calendarId);
+    const hasAccess = await hasOwnedCapability(
+      user?.id,
+      preset.calendarId,
+      "manageOwnPresets",
+      "manageAnyPresets",
+      preset.createdBy
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -212,7 +230,11 @@ export async function DELETE(
     }
 
     // Delete all shifts that were created from this preset
-    await db.delete(shifts).where(eq(shifts.presetId, id));
+    await db
+      .delete(shifts)
+      .where(
+        and(eq(shifts.presetId, id), eq(shifts.calendarId, preset.calendarId))
+      );
 
     // Delete the preset
     await db.delete(shiftPresets).where(eq(shiftPresets.id, id));

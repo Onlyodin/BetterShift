@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { syncLogs, calendars } from "@/lib/db/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { canViewCalendar, canEditCalendar } from "@/lib/auth/permissions";
+import { hasCapability } from "@/lib/auth/permissions";
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Check read permission (works for both authenticated users and guests)
-    const hasAccess = await canViewCalendar(user?.id, calendarId);
+    const hasAccess = await hasCapability(user?.id, calendarId, "viewShifts");
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -88,7 +88,11 @@ export async function PATCH(request: NextRequest) {
     }
 
     // Check write permission (works for both authenticated users and guests)
-    const hasWriteAccess = await canEditCalendar(user?.id, calendarId);
+    const hasWriteAccess = await hasCapability(
+      user?.id,
+      calendarId,
+      "manageExternalSync"
+    );
     if (!hasWriteAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions. Write access required." },
@@ -146,7 +150,11 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Check write permission (works for both authenticated users and guests)
-    const hasWriteAccess = await canEditCalendar(user?.id, calendarId);
+    const hasWriteAccess = await hasCapability(
+      user?.id,
+      calendarId,
+      "deleteSyncLogs"
+    );
     if (!hasWriteAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions. Write access required." },

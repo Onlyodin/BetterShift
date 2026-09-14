@@ -12,12 +12,14 @@ import {
 import { ApiError } from "@/lib/api-error";
 import { generateTempId } from "@/lib/utils";
 import { useIsCalendarAccessible } from "@/hooks/useCalendars";
+import type { BundleRef } from "@/lib/permission-bundles";
 
 export interface CalendarShare {
   id: string;
   calendarId: string;
   userId: string;
-  permission: "owner" | "admin" | "write" | "read";
+  bundleId: string;
+  bundle: BundleRef;
   sharedBy: string;
   createdAt: Date;
   user: {
@@ -38,6 +40,11 @@ export interface SearchUser {
   name: string | null;
   email: string;
   image: string | null;
+}
+
+/** Optimistic placeholder for a bundle reference — settles once the real response/refetch lands. */
+function placeholderBundle(bundleId: string): BundleRef {
+  return { id: bundleId, name: "…", seedKey: null };
 }
 
 /**
@@ -65,12 +72,12 @@ async function fetchSharesApi(calendarId: string): Promise<CalendarShare[]> {
 async function addShareApi(
   calendarId: string,
   userId: string,
-  permission: "admin" | "write" | "read"
+  bundleId: string
 ): Promise<CalendarShare> {
   const response = await fetch(`/api/calendars/${calendarId}/shares`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userId, permission }),
+    body: JSON.stringify({ userId, bundleId }),
   });
 
   if (!response.ok) {
@@ -87,19 +94,19 @@ async function addShareApi(
 }
 
 /**
- * Update a share's permission via API
+ * Update a share's bundle via API
  */
 async function updateShareApi(
   calendarId: string,
   shareId: string,
-  permission: "admin" | "write" | "read"
+  bundleId: string
 ): Promise<CalendarShare> {
   const response = await fetch(
     `/api/calendars/${calendarId}/shares/${shareId}`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ permission }),
+      body: JSON.stringify({ bundleId }),
     }
   );
 
@@ -171,12 +178,12 @@ export function useCalendarShares(calendarId: string) {
   const addShareMutation = useMutation({
     mutationFn: ({
       userId,
-      permission,
+      bundleId,
     }: {
       userId: string;
-      permission: "admin" | "write" | "read";
-    }) => addShareApi(calendarId, userId, permission),
-    onMutate: async ({ userId, permission }) => {
+      bundleId: string;
+    }) => addShareApi(calendarId, userId, bundleId),
+    onMutate: async ({ userId, bundleId }) => {
       await queryClient.cancelQueries({
         queryKey: queryKeys.shares.byCalendar(calendarId),
       });
@@ -184,12 +191,14 @@ export function useCalendarShares(calendarId: string) {
         queryKeys.shares.byCalendar(calendarId)
       );
 
-      // Optimistic update
+      // Optimistic update — the bundle's name/seedKey are filled in once the
+      // real response/refetch lands, a brief "…" is an acceptable approximation.
       const optimisticShare: CalendarShare = {
         id: `temp-${generateTempId()}`,
         calendarId,
         userId,
-        permission,
+        bundleId,
+        bundle: placeholderBundle(bundleId),
         sharedBy: "current-user",
         createdAt: new Date(),
         user: {
@@ -237,12 +246,12 @@ export function useCalendarShares(calendarId: string) {
   const updateShareMutation = useMutation({
     mutationFn: ({
       shareId,
-      permission,
+      bundleId,
     }: {
       shareId: string;
-      permission: "admin" | "write" | "read";
-    }) => updateShareApi(calendarId, shareId, permission),
-    onMutate: async ({ shareId, permission }) => {
+      bundleId: string;
+    }) => updateShareApi(calendarId, shareId, bundleId),
+    onMutate: async ({ shareId, bundleId }) => {
       await queryClient.cancelQueries({
         queryKey: queryKeys.shares.byCalendar(calendarId),
       });
@@ -250,11 +259,15 @@ export function useCalendarShares(calendarId: string) {
         queryKeys.shares.byCalendar(calendarId)
       );
 
-      // Optimistic update
+      // Optimistic update — bundle name/seedKey settle once the refetch lands.
       queryClient.setQueryData(
         queryKeys.shares.byCalendar(calendarId),
         (old: CalendarShare[] = []) =>
-          old.map((s) => (s.id === shareId ? { ...s, permission } : s))
+          old.map((s) =>
+            s.id === shareId
+              ? { ...s, bundleId, bundle: placeholderBundle(bundleId) }
+              : s
+          )
       );
 
       return { previous };
@@ -357,10 +370,10 @@ export function useCalendarShares(calendarId: string) {
     searchLoading,
     addShare: async (
       userId: string,
-      permission: "admin" | "write" | "read"
+      bundleId: string
     ): Promise<{ success: boolean }> => {
       try {
-        await addShareMutation.mutateAsync({ userId, permission });
+        await addShareMutation.mutateAsync({ userId, bundleId });
         return { success: true };
       } catch {
         return { success: false };
@@ -368,10 +381,10 @@ export function useCalendarShares(calendarId: string) {
     },
     updateShare: async (
       shareId: string,
-      permission: "admin" | "write" | "read"
+      bundleId: string
     ): Promise<{ success: boolean }> => {
       try {
-        await updateShareMutation.mutateAsync({ shareId, permission });
+        await updateShareMutation.mutateAsync({ shareId, bundleId });
         return { success: true };
       } catch {
         return { success: false };

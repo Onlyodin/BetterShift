@@ -3,7 +3,12 @@ import { db } from "@/lib/db";
 import { calendarAccessTokens, calendars } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { checkPermission } from "@/lib/auth/permissions";
+import { getCalendarAccess, hasCapability } from "@/lib/auth/permissions";
+import {
+  assertBundleWithinCallerCapabilities,
+  handleBundleServiceError,
+  resolveGuestEligibleBundle,
+} from "@/lib/auth/permission-bundles-service";
 import { logAuditEvent } from "@/lib/audit-log";
 
 /**
@@ -27,12 +32,10 @@ export async function PATCH(
       );
     }
 
-    // Check permissions (admin or owner only)
-    const canManage =
-      (await checkPermission(user.id, calendarId, "admin")) ||
-      (await checkPermission(user.id, calendarId, "owner"));
+    // Check permissions
+    const access = await getCalendarAccess(user.id, calendarId);
 
-    if (!canManage) {
+    if (!access?.can("manageGuestAccess")) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
         { status: 403 }
@@ -58,22 +61,37 @@ export async function PATCH(
     const body = await request.json();
     const {
       name,
-      permission,
+      bundleId,
       expiresAt,
       isActive,
     }: {
       name?: string;
-      permission?: "read" | "write";
+      bundleId?: string;
       expiresAt?: string | null;
       isActive?: boolean;
     } = body;
 
-    // Validate permission if provided
-    if (permission && permission !== "read" && permission !== "write") {
-      return NextResponse.json(
-        { error: "Permission must be 'read' or 'write'" },
-        { status: 400 }
+    // Validate the new bundle if provided: must exist, belong to this
+    // calendar, and be guest-eligible (E7) — a link is always a guest/link source.
+    let newBundle: Awaited<ReturnType<typeof resolveGuestEligibleBundle>> | null =
+      null;
+    if (bundleId !== undefined) {
+      if (typeof bundleId !== "string") {
+        return NextResponse.json(
+          { error: "Invalid bundle id" },
+          { status: 400 }
+        );
+      }
+      newBundle = await resolveGuestEligibleBundle(
+        calendarId,
+        bundleId,
+        "Bundle contains capabilities that cannot be granted via a link"
       );
+      if (newBundle instanceof NextResponse) return newBundle;
+      // A non-owner manageGuestAccess holder may only assign a bundle whose
+      // capabilities are a subset of their own — closes the self-escalation
+      // path a fixed cap used to guard against pre-PR.
+      assertBundleWithinCallerCapabilities(access, newBundle.capabilities);
     }
 
     // Validate expiration date if provided
@@ -101,7 +119,7 @@ export async function PATCH(
     // Build update object
     const updates: Partial<typeof calendarAccessTokens.$inferInsert> = {};
     if (name !== undefined) updates.name = name;
-    if (permission !== undefined) updates.permission = permission;
+    if (newBundle) updates.bundleId = newBundle.id;
     if (expiresAtDate !== undefined) updates.expiresAt = expiresAtDate;
     if (isActive !== undefined) updates.isActive = isActive;
 
@@ -136,21 +154,25 @@ export async function PATCH(
       isUserVisible: true,
     });
 
+    // Resolve the token's bundle identity for the response — reuse the
+    // already-validated bundle instead of re-fetching it when it was part
+    // of this request.
+    const updatedBundle = newBundle
+      ? { id: newBundle.id, name: newBundle.name, seedKey: newBundle.seedKey }
+      : await db.query.calendarPermissionBundles.findFirst({
+          where: (b, { eq: eqOp }) => eqOp(b.id, updatedToken.bundleId),
+          columns: { id: true, name: true, seedKey: true },
+        });
+
     // Return sanitized token (no full token)
     return NextResponse.json({
       ...updatedToken,
+      bundle: updatedBundle ?? null,
       tokenPreview: `${updatedToken.token.slice(0, 6)}...`,
       token: undefined,
     });
   } catch (error) {
-    console.error(
-      "[API] PATCH /api/calendars/[id]/tokens/[tokenId] error:",
-      error
-    );
-    return NextResponse.json(
-      { error: "Failed to update access token" },
-      { status: 500 }
-    );
+    return handleBundleServiceError(error, "Failed to update access token");
   }
 }
 
@@ -174,10 +196,12 @@ export async function DELETE(
       );
     }
 
-    // Check permissions (admin or owner only)
-    const canManage =
-      (await checkPermission(user.id, calendarId, "admin")) ||
-      (await checkPermission(user.id, calendarId, "owner"));
+    // Check permissions
+    const canManage = await hasCapability(
+      user.id,
+      calendarId,
+      "manageGuestAccess"
+    );
 
     if (!canManage) {
       return NextResponse.json(
@@ -224,7 +248,7 @@ export async function DELETE(
         tokenId,
         tokenName: token.name || "Unnamed",
         calendarName: calendar?.name || "Unknown",
-        permission: token.permission,
+        bundleId: token.bundleId,
         usageCount: token.usageCount,
       },
       request,

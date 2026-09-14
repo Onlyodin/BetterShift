@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { calendars, shifts, externalSyncs } from "@/lib/db/schema";
+import { calendars, shifts, shiftPresets, externalSyncs } from "@/lib/db/schema";
 import { eq, and, gte, lte, or, isNull } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { canViewCalendar, canEditCalendar } from "@/lib/auth/permissions";
+import { hasCapability, getCalendarAccess } from "@/lib/auth/permissions";
 import { addShiftSignup, withSignups } from "@/lib/shift-signups";
 import { parseLocalDate } from "@/lib/date-utils";
 import type { CalendarMember } from "@/lib/types";
@@ -38,7 +38,7 @@ export async function GET(request: Request) {
     }
 
     // Check read permission (works for both authenticated users and guests)
-    const hasAccess = await canViewCalendar(user?.id, calendarId);
+    const hasAccess = await hasCapability(user?.id, calendarId, "viewShifts");
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -61,6 +61,7 @@ export async function GET(request: Request) {
         signupCapacity: shifts.signupCapacity,
         syncedFromExternal: shifts.syncedFromExternal,
         externalSyncId: shifts.externalSyncId,
+        createdBy: shifts.createdBy,
         createdAt: shifts.createdAt,
         updatedAt: shifts.updatedAt,
         calendar: {
@@ -158,9 +159,12 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check write permission (works for both authenticated users and guests)
-    const hasAccess = await canEditCalendar(user?.id, calendarId);
-    if (!hasAccess) {
+    // A caller needs at least one of the two shift-creation capabilities.
+    const access = await getCalendarAccess(user?.id, calendarId);
+    if (
+      !access ||
+      !(access.can("stampPreset") || access.can("createShift"))
+    ) {
       return NextResponse.json(
         { error: "Insufficient permissions. Write access required." },
         { status: 403 }
@@ -177,21 +181,88 @@ export async function POST(request: Request) {
       );
     }
 
+    // A caller with only stampPreset (no createShift) can only stamp an
+    // existing preset as-is — pull title/time/color/notes/isAllDay from the
+    // preset record itself instead of trusting client-submitted overrides,
+    // otherwise "presets only" is trivially bypassed by sending presetId
+    // alongside arbitrary fields.
+    let insertValues: {
+      title: string;
+      startTime: string;
+      endTime: string;
+      color: string;
+      notes: string | null;
+      isAllDay: boolean;
+    };
+    if (access.can("createShift")) {
+      if (presetId) {
+        const [preset] = await db
+          .select()
+          .from(shiftPresets)
+          .where(
+            and(
+              eq(shiftPresets.id, presetId),
+              eq(shiftPresets.calendarId, calendarId)
+            )
+          );
+        if (!preset) {
+          return NextResponse.json(
+            { error: "Preset not found" },
+            { status: 404 }
+          );
+        }
+      }
+      insertValues = {
+        title,
+        startTime: isAllDay ? "00:00" : startTime,
+        endTime: isAllDay ? "23:59" : endTime,
+        color: color || "#3b82f6",
+        notes: notes || null,
+        isAllDay: isAllDay || false,
+      };
+    } else {
+      if (!presetId) {
+        return NextResponse.json(
+          { error: "presetId is required" },
+          { status: 400 }
+        );
+      }
+      const [preset] = await db
+        .select()
+        .from(shiftPresets)
+        .where(
+          and(
+            eq(shiftPresets.id, presetId),
+            eq(shiftPresets.calendarId, calendarId)
+          )
+        );
+      if (!preset) {
+        return NextResponse.json(
+          { error: "Preset not found" },
+          { status: 404 }
+        );
+      }
+      insertValues = {
+        title: preset.title,
+        startTime: preset.isAllDay ? "00:00" : preset.startTime,
+        endTime: preset.isAllDay ? "23:59" : preset.endTime,
+        color: preset.color,
+        notes: preset.notes,
+        isAllDay: preset.isAllDay,
+      };
+    }
+
     const [shift] = await db
       .insert(shifts)
       .values({
         calendarId,
         presetId: presetId || null,
         date: parsedDate,
-        startTime: isAllDay ? "00:00" : startTime,
-        endTime: isAllDay ? "23:59" : endTime,
-        title,
-        color: color || "#3b82f6",
-        notes: notes || null,
-        isAllDay: isAllDay || false,
+        ...insertValues,
         isSecondary: isSecondary || false,
         signupCapacity:
           typeof signupCapacity === "number" ? signupCapacity : null,
+        createdBy: user?.id ?? null,
         createdAt: new Date(),
         updatedAt: new Date(),
       })

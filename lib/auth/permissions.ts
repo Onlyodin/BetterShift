@@ -2,136 +2,133 @@ import { db } from "@/lib/db";
 import {
   calendars,
   calendarShares,
+  calendarPermissionBundles,
   userCalendarSubscriptions,
+  type CalendarPermissionBundle,
 } from "@/lib/db/schema";
 import { eq, and, isNull } from "drizzle-orm";
 import { allowGuestAccess, isAuthEnabled } from "@/lib/auth/feature-flags";
 import {
-  getTokenPermission,
+  getTokenBundleId,
   getTokensFromCookie,
   validateAccessToken,
 } from "@/lib/auth/token-auth";
-import type { CalendarMember } from "@/lib/types";
+import type { CalendarBundleRef, CalendarMember } from "@/lib/types";
+import {
+  applyGuestCeiling,
+  CAPABILITIES,
+  sanitizeBundle,
+  type BundleDefinition,
+  type Capability,
+} from "@/lib/permission-bundles";
 
-/**
- * Calendar permission levels
- * - owner: Full control, can delete calendar
- * - admin: Can manage calendar settings and shares
- * - write: Can create/edit/delete shifts, presets, notes
- * - read: Can only view calendar data
- */
-export type CalendarPermission = "owner" | "admin" | "write" | "read";
+async function getBundleById(
+  bundleId: string
+): Promise<CalendarPermissionBundle | null> {
+  const bundle = await db.query.calendarPermissionBundles.findFirst({
+    where: eq(calendarPermissionBundles.id, bundleId),
+  });
+  return bundle ? sanitizeBundle(bundle) : null;
+}
 
-/**
- * Guest permission levels (subset of CalendarPermission)
- * - none: No guest access
- * - read: Guests can view calendar data
- * - write: Guests can create/edit/delete shifts, presets, notes
- */
-export type GuestPermission = "none" | "read" | "write";
+interface ResolvedCalendarAccess {
+  isOwner: boolean;
+  source: "owner" | "share" | "token" | "guestBundle";
+  capabilities: Capability[];
+  calendar: typeof calendars.$inferSelect;
+  /** null for the owner/auth-disabled branches, which never go through a bundle. */
+  bundle: CalendarBundleRef | null;
+}
 
-/**
- * Get user's permission level for a specific calendar
- * Returns null if user has no access to the calendar
- *
- * Permission priority (highest to lowest):
- * 1. Owner (calendar.ownerId matches userId)
- * 2. Shared permission (via calendarShares)
- * 3. Access token (via cookie)
- * 4. Public/Guest permission (for subscribed users or when guest access enabled)
- *
- * For guest users (userId = null), checks:
- * - Access token permission
- * - Guest permission (if auth enabled + guest access enabled + calendar allows it)
- */
-export async function getUserCalendarPermission(
-  userId: string | null | undefined,
-  calendarId: string
-): Promise<CalendarPermission | null> {
-  return (await getUserCalendarPermissionWithCalendar(userId, calendarId))
-    .permission;
+function ownerAccess(calendar: typeof calendars.$inferSelect): ResolvedCalendarAccess {
+  return {
+    isOwner: true,
+    source: "owner",
+    capabilities: [...CAPABILITIES],
+    calendar,
+    bundle: null,
+  };
+}
+
+function bundleAccess(
+  calendar: typeof calendars.$inferSelect,
+  source: "share" | "token" | "guestBundle",
+  bundle: CalendarPermissionBundle
+): ResolvedCalendarAccess {
+  return {
+    isOwner: false,
+    source,
+    capabilities: bundle.capabilities,
+    calendar,
+    bundle: { id: bundle.id, name: bundle.name, seedKey: bundle.seedKey },
+  };
 }
 
 /**
- * Same resolution as getUserCalendarPermission, but also returns the calendar
- * row it already fetched — lets callers that need calendar columns (e.g.
- * getShiftSignupPermission) avoid a second round trip for the same row.
+ * Resolves what a caller may do on a calendar: owner (everything), or the
+ * capability set of whichever bundle they hold (share > token > guest bundle
+ * for authenticated users; token > guest bundle for guests). Returns null
+ * when the calendar doesn't exist, is orphaned, or grants no access at all.
  */
-async function getUserCalendarPermissionWithCalendar(
+async function resolveCalendarAccess(
   userId: string | null | undefined,
   calendarId: string
-): Promise<{
-  permission: CalendarPermission | null;
-  calendar: typeof calendars.$inferSelect | null;
-}> {
-  // If auth is disabled, grant full owner access (backwards compatibility)
-  if (!isAuthEnabled()) {
-    const calendar = await db.query.calendars.findFirst({
-      where: eq(calendars.id, calendarId),
-    });
-    return { permission: calendar ? "owner" : null, calendar: calendar ?? null };
-  }
-
-  // Fetch calendar first (needed for all checks)
+): Promise<ResolvedCalendarAccess | null> {
+  // guestBundle fetched alongside the calendar (one hop via the relation)
+  // since almost every branch below may need it.
   const calendar = await db.query.calendars.findFirst({
     where: eq(calendars.id, calendarId),
+    with: { guestBundle: true },
   });
+  if (!calendar) return null;
 
-  if (!calendar) {
-    return { permission: null, calendar: null };
+  // If auth is disabled, grant full owner access (backwards compatibility)
+  if (!isAuthEnabled()) {
+    return ownerAccess(calendar);
   }
 
-  // CRITICAL: Orphaned calendars (ownerId=null) are invisible to ALL users
-  // They can only be accessed via dedicated admin panel API routes
-  if (calendar.ownerId === null) {
-    return { permission: null, calendar };
-  }
+  // CRITICAL: Orphaned calendars (ownerId=null) are invisible to ALL users.
+  // They can only be accessed via dedicated admin panel API routes.
+  if (calendar.ownerId === null) return null;
 
-  // If no user ID, check token and guest permissions
+  const guestBundle = calendar.guestBundle ? sanitizeBundle(calendar.guestBundle) : null;
+
   if (!userId) {
-    // Check for access token first (higher priority than guest)
-    const tokenPermission = await getTokenPermission(calendarId);
-    if (tokenPermission) {
-      return { permission: tokenPermission, calendar };
+    const tokenBundleId = await getTokenBundleId(calendarId);
+    if (tokenBundleId) {
+      const bundle = await getBundleById(tokenBundleId);
+      if (bundle) return bundleAccess(calendar, "token", bundle);
     }
-
     // Guest access only works when explicitly enabled
-    if ((await allowGuestAccess()) && calendar.guestPermission !== "none") {
-      return {
-        permission: calendar.guestPermission as CalendarPermission,
-        calendar,
-      };
+    if ((await allowGuestAccess()) && guestBundle) {
+      return bundleAccess(calendar, "guestBundle", guestBundle);
     }
-    return { permission: null, calendar };
+    return null;
   }
 
-  // Owner has full control
   if (calendar.ownerId === userId) {
-    return { permission: "owner", calendar };
+    return ownerAccess(calendar);
   }
 
-  // Check shared permissions (higher priority than tokens)
   const share = await db.query.calendarShares.findFirst({
     where: and(
       eq(calendarShares.calendarId, calendarId),
       eq(calendarShares.userId, userId)
     ),
+    with: { bundle: true },
   });
-
-  if (share) {
-    return {
-      permission: share.permission as CalendarPermission,
-      calendar,
-    };
+  if (share?.bundle) {
+    return bundleAccess(calendar, "share", sanitizeBundle(share.bundle));
   }
 
-  // Check for access token (authenticated users can also use tokens)
-  const tokenPermission = await getTokenPermission(calendarId);
-  if (tokenPermission) {
-    return { permission: tokenPermission, calendar };
+  const tokenBundleId = await getTokenBundleId(calendarId);
+  if (tokenBundleId) {
+    const bundle = await getBundleById(tokenBundleId);
+    if (bundle) return bundleAccess(calendar, "token", bundle);
   }
 
-  // Check if user is subscribed to this public calendar
+  // Authenticated users can always access public calendars they're
+  // subscribed to, regardless of the allowGuestAccess() setting.
   const subscription = await db.query.userCalendarSubscriptions.findFirst({
     where: and(
       eq(userCalendarSubscriptions.calendarId, calendarId),
@@ -139,69 +136,150 @@ async function getUserCalendarPermissionWithCalendar(
       eq(userCalendarSubscriptions.status, "subscribed")
     ),
   });
-
-  // If subscribed and calendar has public access (guestPermission != "none"), return that permission
-  // Authenticated users can always access public calendars, regardless of allowGuestAccess setting
-  if (subscription && calendar.guestPermission !== "none") {
-    return {
-      permission: calendar.guestPermission as CalendarPermission,
-      calendar,
-    };
+  if (subscription && guestBundle) {
+    return bundleAccess(calendar, "guestBundle", guestBundle);
   }
 
-  return { permission: null, calendar };
+  return null;
+}
+
+export interface CalendarAccess {
+  isOwner: boolean;
+  /** Whether the caller may perform a specific capability on the calendar. */
+  can(capability: Capability): boolean;
+  /**
+   * Whether the caller may act on a specific resource (a shift, preset or
+   * note) given the two capabilities that gate it and who created it (E1).
+   * `any` covers every resource regardless of creator; `own` only covers
+   * resources with no known creator or created by the caller (E8) — for an
+   * anonymous guest (no userId) that means only creator-less resources
+   * count as "own" (E9's authenticated-guest exception doesn't apply here,
+   * this is ownership, not signup eligibility).
+   */
+  canOwned(own: Capability, any: Capability, createdBy: string | null): boolean;
 }
 
 /**
- * Check if user has at least the required permission level
+ * Applies the hard ceiling that keeps guest/link access from ever reaching
+ * administrative capabilities (manageShares, manageGuestAccess,
+ * manageCalendarSettings, manageExternalSync, deleteSyncLogs), even if a
+ * bundle was somehow misconfigured to include them — the actual security
+ * boundary behind GUEST_INELIGIBLE in lib/permission-bundles.ts. Owners get
+ * every capability; a "share" source is never ceilinged (invited users may
+ * legitimately hold admin-only capabilities).
  */
-export async function checkPermission(
+function ceilingFilteredCapabilities(access: ResolvedCalendarAccess): Capability[] {
+  if (access.isOwner) return [...CAPABILITIES];
+  if (access.source === "share") return access.capabilities;
+  return applyGuestCeiling(access.capabilities);
+}
+
+/**
+ * Resolves a caller's access to a calendar once and returns an object with
+ * `can()`/`canOwned()` so routes that need several checks don't re-resolve
+ * calendar/share/token/guest-bundle lookups per check. `hasCapability()` and
+ * `hasOwnedCapability()` below are thin single-check convenience wrappers.
+ */
+export async function getCalendarAccess(
+  userId: string | null | undefined,
+  calendarId: string
+): Promise<CalendarAccess | null> {
+  const access = await resolveCalendarAccess(userId, calendarId);
+  if (!access) return null;
+
+  const effective = ceilingFilteredCapabilities(access);
+  const can = (capability: Capability): boolean => effective.includes(capability);
+
+  const canOwned = (
+    own: Capability,
+    any: Capability,
+    createdBy: string | null
+  ): boolean => {
+    if (access.isOwner) return true;
+    if (can(any)) return true;
+    if (!can(own)) return false;
+    return createdBy === null || createdBy === (userId ?? null);
+  };
+
+  return { isOwner: access.isOwner, can, canOwned };
+}
+
+export interface EffectiveAccessSummary {
+  isOwner: boolean;
+  capabilities: Capability[];
+  /** null for the owner and for auth-disabled — every other source resolves through a bundle. */
+  bundle: CalendarBundleRef | null;
+}
+
+/**
+ * Ceiling-filtered capabilities plus the bundle they came from, for API
+ * responses that hand the client its own effective access (calendar list,
+ * subscriptions) instead of the old sharePermission/tokenPermission/
+ * guestPermission enum fields. Client-side gating should check these
+ * capabilities directly rather than re-deriving a coarse level.
+ */
+export async function getEffectiveAccessSummary(
+  userId: string | null | undefined,
+  calendarId: string
+): Promise<EffectiveAccessSummary | null> {
+  const access = await resolveCalendarAccess(userId, calendarId);
+  if (!access) return null;
+  return {
+    isOwner: access.isOwner,
+    capabilities: ceilingFilteredCapabilities(access),
+    bundle: access.isOwner ? null : access.bundle,
+  };
+}
+
+/**
+ * Whether the caller may perform a specific capability on a calendar. This
+ * is the primary enforcement API for calendar-wide capabilities — route
+ * handlers should check exactly the capability their action needs, not a
+ * coarse level. For own/any-gated resources use hasOwnedCapability(), and
+ * for several checks on the same request prefer getCalendarAccess() once.
+ */
+export async function hasCapability(
   userId: string | null | undefined,
   calendarId: string,
-  required: CalendarPermission
+  capability: Capability
 ): Promise<boolean> {
-  const userPermission = await getUserCalendarPermission(userId, calendarId);
+  const access = await getCalendarAccess(userId, calendarId);
+  return access ? access.can(capability) : false;
+}
 
-  if (!userPermission) {
-    return false;
-  }
-
-  // Permission hierarchy: owner > admin > write > read
-  const hierarchy: CalendarPermission[] = ["owner", "admin", "write", "read"];
-  const userLevel = hierarchy.indexOf(userPermission);
-  const requiredLevel = hierarchy.indexOf(required);
-
-  return userLevel <= requiredLevel;
+/** Single-check convenience wrapper around CalendarAccess.canOwned() — see there. */
+export async function hasOwnedCapability(
+  userId: string | null | undefined,
+  calendarId: string,
+  own: Capability,
+  any: Capability,
+  createdBy: string | null
+): Promise<boolean> {
+  const access = await getCalendarAccess(userId, calendarId);
+  return access ? access.canOwned(own, any, createdBy) : false;
 }
 
 /**
- * Check if user can view a calendar
+ * Whether the caller has any access to a calendar at all (works for both
+ * authenticated users and guests). Used by GET routes that only need to
+ * gate presence, not a specific capability — viewShifts/viewNotesEvents/
+ * viewStats are in every seeded and migrated bundle, so this is normally
+ * equivalent to "has view access", without depending on a custom bundle
+ * having ticked a specific view capability.
  */
 export async function canViewCalendar(
   userId: string | null | undefined,
   calendarId: string
 ): Promise<boolean> {
-  return checkPermission(userId, calendarId, "read");
+  return (await resolveCalendarAccess(userId, calendarId)) !== null;
 }
 
-/**
- * Check if user can edit calendar data (shifts, presets, notes)
- */
-export async function canEditCalendar(
+export async function isCalendarOwner(
   userId: string | null | undefined,
   calendarId: string
 ): Promise<boolean> {
-  return checkPermission(userId, calendarId, "write");
-}
-
-/**
- * Check if user can manage calendar settings and shares
- */
-export async function canManageCalendar(
-  userId: string | null | undefined,
-  calendarId: string
-): Promise<boolean> {
-  return checkPermission(userId, calendarId, "admin");
+  const access = await getCalendarAccess(userId, calendarId);
+  return access?.isOwner ?? false;
 }
 
 /**
@@ -211,7 +289,7 @@ export async function canDeleteCalendar(
   userId: string | null | undefined,
   calendarId: string
 ): Promise<boolean> {
-  return checkPermission(userId, calendarId, "owner");
+  return isCalendarOwner(userId, calendarId);
 }
 
 /**
@@ -219,66 +297,68 @@ export async function canDeleteCalendar(
  * - canManageOwn: may add/remove themselves
  * - canManageOthers: may add/remove any other member
  *
- * Only logged-in users (userId set) can hold signups at all — guests never do,
- * even when a share/access-token grants them "write" on the calendar itself.
- * The calendar-wide signupsEnabled switch (owner/admin only) overrides
- * everything else. A "read"-level member can only self-manage, and only while
- * allowSelfSignup is on; write/admin/owner can always manage anyone.
+ * Only logged-in users (userId set) can hold signups at all — guests never
+ * do, even when a token/guest bundle grants them signUpSelf/signUpOthers on
+ * the calendar itself. The calendar-wide signupsEnabled switch (gated by
+ * manageCalendarSettings) overrides everything else.
  */
 export async function getShiftSignupPermission(
   userId: string | null | undefined,
   calendarId: string
 ): Promise<{ canManageOwn: boolean; canManageOthers: boolean }> {
+  const access = await resolveCalendarAccess(userId, calendarId);
+  if (!access || !access.calendar.signupsEnabled) {
+    return { canManageOwn: false, canManageOthers: false };
+  }
+  if (access.isOwner) {
+    return { canManageOwn: true, canManageOthers: true };
+  }
   if (!userId) {
     return { canManageOwn: false, canManageOthers: false };
   }
-
-  const { permission, calendar } = await getUserCalendarPermissionWithCalendar(
-    userId,
-    calendarId
-  );
-  if (!permission) {
-    return { canManageOwn: false, canManageOthers: false };
-  }
-
-  if (!calendar?.signupsEnabled) {
-    return { canManageOwn: false, canManageOthers: false };
-  }
-
-  if (permission !== "read") {
-    // owner / admin / write
-    return { canManageOwn: true, canManageOthers: true };
-  }
-
   return {
-    canManageOwn: !!calendar.allowSelfSignup,
-    canManageOthers: false,
+    canManageOwn: access.capabilities.includes("signUpSelf"),
+    canManageOthers: access.capabilities.includes("signUpOthers"),
   };
 }
 
 /**
- * Get all calendar IDs accessible to a user (or guest)
- * Returns array of calendar IDs with their permission levels
+ * Resolves which of the given bundle ids still exist. guestBundleId has no
+ * DB-level FK (see lib/db/schema.ts), so a bundle deletion (Stufe 2) can
+ * leave it pointing at nothing — callers must treat that the same as "no
+ * guest access" rather than resolving it anyway (4.2/4.3 of the design doc).
+ */
+async function existingBundleIds(
+  ids: Iterable<string>
+): Promise<Set<string>> {
+  const idList = Array.from(new Set(ids));
+  if (idList.length === 0) return new Set();
+  const rows = await db.query.calendarPermissionBundles.findMany({
+    where: (b, { inArray }) => inArray(b.id, idList),
+    columns: { id: true },
+  });
+  return new Set(rows.map((row) => row.id));
+}
+
+/**
+ * Get all calendar IDs accessible to a user (or guest), with an isOwner flag.
  *
  * For guest users (userId = null), returns:
  * - Calendars accessible via access tokens (always, regardless of allowGuestAccess)
- * - Calendars with guestPermission != "none" (only if guest access is enabled)
+ * - Calendars with a guestBundleId set (only if guest access is enabled)
  */
 export async function getUserAccessibleCalendars(
   userId: string | null | undefined
-): Promise<Array<{ id: string; permission: CalendarPermission }>> {
-  // If auth is disabled, return all calendars with owner permission (backwards compatibility)
+): Promise<Array<{ id: string; isOwner: boolean }>> {
   if (!isAuthEnabled()) {
-    const allCalendars = await db.query.calendars.findMany();
-    return allCalendars.map((cal) => ({
-      id: cal.id,
-      permission: "owner" as const,
-    }));
+    const allCalendars = await db.query.calendars.findMany({
+      columns: { id: true },
+    });
+    return allCalendars.map((cal) => ({ id: cal.id, isOwner: true }));
   }
 
-  // Guest access: return calendars accessible via tokens or guest permissions
   if (!userId) {
-    const results: Array<{ id: string; permission: CalendarPermission }> = [];
+    const results: Array<{ id: string; isOwner: boolean }> = [];
     const existingIds = new Set<string>();
 
     // Token-based access and the guest-access flag don't depend on each
@@ -290,114 +370,84 @@ export async function getUserAccessibleCalendars(
 
     // First, check for token-based access (always works, regardless of allowGuestAccess)
     for (const tokenData of tokens) {
-      // Validate token is still valid
       const validation = await validateAccessToken(tokenData.token);
       if (validation && validation.calendarId === tokenData.calendarId) {
-        results.push({
-          id: tokenData.calendarId,
-          permission: tokenData.permission as CalendarPermission,
-        });
+        results.push({ id: tokenData.calendarId, isOwner: false });
         existingIds.add(tokenData.calendarId);
       }
     }
 
-    // Then, check for guest permissions (only if guest access is enabled)
+    // Then, check for guest bundle access (only if guest access is enabled)
     if (guestAccessEnabled) {
       const guestAccessibleCalendars = await db.query.calendars.findMany({
-        where: (calendars, { ne }) => ne(calendars.guestPermission, "none"),
+        where: (calendars, { isNotNull }) => isNotNull(calendars.guestBundleId),
+        columns: { id: true, guestBundleId: true },
       });
-
+      const liveBundleIds = await existingBundleIds(
+        guestAccessibleCalendars.map((cal) => cal.guestBundleId!)
+      );
       for (const cal of guestAccessibleCalendars) {
-        if (!existingIds.has(cal.id)) {
-          results.push({
-            id: cal.id,
-            permission: cal.guestPermission as CalendarPermission,
-          });
-          existingIds.add(cal.id);
-        }
+        if (existingIds.has(cal.id)) continue;
+        if (!liveBundleIds.has(cal.guestBundleId!)) continue;
+        results.push({ id: cal.id, isOwner: false });
+        existingIds.add(cal.id);
       }
     }
 
     return results;
   }
 
-  const results: Array<{ id: string; permission: CalendarPermission }> = [];
+  const results: Array<{ id: string; isOwner: boolean }> = [];
 
-  // Get owned calendars (ALWAYS visible, cannot be dismissed)
-  const ownedCalendars = await db.query.calendars.findMany({
-    where: eq(calendars.ownerId, userId),
-  });
+  const [ownedCalendars, subscriptions, sharedCalendars] = await Promise.all([
+    db.query.calendars.findMany({
+      where: eq(calendars.ownerId, userId),
+      columns: { id: true },
+    }),
+    db.query.userCalendarSubscriptions.findMany({
+      where: eq(userCalendarSubscriptions.userId, userId),
+      with: { calendar: true },
+    }),
+    db.query.calendarShares.findMany({
+      where: eq(calendarShares.userId, userId),
+    }),
+  ]);
+  results.push(...ownedCalendars.map((cal) => ({ id: cal.id, isOwner: true })));
 
-  results.push(
-    ...ownedCalendars.map((cal) => ({
-      id: cal.id,
-      permission: "owner" as const,
-    }))
-  );
-
-  // Get all subscriptions for this user (including dismissed)
-  const subscriptions = await db.query.userCalendarSubscriptions.findMany({
-    where: eq(userCalendarSubscriptions.userId, userId),
-    with: {
-      calendar: true,
-    },
-  });
-
-  // Get shared calendars (not owned by user)
-  const sharedCalendars = await db.query.calendarShares.findMany({
-    where: eq(calendarShares.userId, userId),
-    with: {
-      calendar: true,
-    },
-  });
-
-  // Track which calendars exist to prevent duplicates
   const existingIds = new Set(results.map((r) => r.id));
 
-  // Add shared calendars (share permission takes precedence over guest permission)
   for (const share of sharedCalendars) {
-    if (existingIds.has(share.calendarId)) continue; // Skip if owned
-
-    // Check if user has dismissed this shared calendar
+    if (existingIds.has(share.calendarId)) continue;
     const isDismissed = subscriptions.find(
       (sub) => sub.calendarId === share.calendarId && sub.status === "dismissed"
     );
-
     if (!isDismissed) {
-      results.push({
-        id: share.calendarId,
-        permission: share.permission as CalendarPermission,
-      });
+      results.push({ id: share.calendarId, isOwner: false });
       existingIds.add(share.calendarId);
     }
   }
 
-  // Add guest-subscribed calendars (only if not already included via shares and not dismissed)
+  const subscriptionGuestBundleIds = await existingBundleIds(
+    subscriptions
+      .map((sub) => sub.calendar.guestBundleId)
+      .filter((id): id is string => id !== null)
+  );
   for (const sub of subscriptions) {
     if (existingIds.has(sub.calendarId)) continue;
-    if (sub.calendar.guestPermission === "none") continue;
+    if (!sub.calendar.guestBundleId) continue;
+    if (!subscriptionGuestBundleIds.has(sub.calendar.guestBundleId)) continue;
     if (sub.source !== "guest") continue;
-    if (sub.status === "dismissed") continue; // Skip dismissed guest subscriptions
-
-    results.push({
-      id: sub.calendarId,
-      permission: sub.calendar.guestPermission as CalendarPermission,
-    });
+    if (sub.status === "dismissed") continue;
+    results.push({ id: sub.calendarId, isOwner: false });
     existingIds.add(sub.calendarId);
   }
 
-  // Add token-accessible calendars (authenticated users can also use access tokens)
   const tokens = await getTokensFromCookie();
   for (const tokenData of tokens) {
     if (existingIds.has(tokenData.calendarId)) continue;
-
-    // Validate token is still valid
     const validation = await validateAccessToken(tokenData.token);
     if (validation && validation.calendarId === tokenData.calendarId) {
-      results.push({
-        id: tokenData.calendarId,
-        permission: tokenData.permission as CalendarPermission,
-      });
+      results.push({ id: tokenData.calendarId, isOwner: false });
       existingIds.add(tokenData.calendarId);
     }
   }
@@ -433,7 +483,6 @@ export async function dismissCalendar(
   userId: string,
   calendarId: string
 ): Promise<void> {
-  // Check if user owns the calendar
   const calendar = await db.query.calendars.findFirst({
     where: eq(calendars.id, calendarId),
   });
@@ -446,7 +495,6 @@ export async function dismissCalendar(
     throw new Error("Cannot dismiss your own calendar");
   }
 
-  // Check if it's a shared calendar
   const share = await db.query.calendarShares.findFirst({
     where: and(
       eq(calendarShares.calendarId, calendarId),
@@ -454,7 +502,6 @@ export async function dismissCalendar(
     ),
   });
 
-  // Check if subscription already exists
   const existingSub = await db.query.userCalendarSubscriptions.findFirst({
     where: and(
       eq(userCalendarSubscriptions.userId, userId),
@@ -463,7 +510,6 @@ export async function dismissCalendar(
   });
 
   if (existingSub) {
-    // Update existing subscription to dismissed
     await db
       .update(userCalendarSubscriptions)
       .set({
@@ -473,7 +519,6 @@ export async function dismissCalendar(
       })
       .where(eq(userCalendarSubscriptions.id, existingSub.id));
   } else {
-    // Create new dismissal entry
     await db.insert(userCalendarSubscriptions).values({
       userId,
       calendarId,
@@ -504,7 +549,6 @@ export async function undismissCalendar(
     throw new Error("Cannot subscribe to your own calendar");
   }
 
-  // Check if it's a shared calendar
   const share = await db.query.calendarShares.findFirst({
     where: and(
       eq(calendarShares.calendarId, calendarId),
@@ -512,12 +556,14 @@ export async function undismissCalendar(
     ),
   });
 
-  // For guest calendars, verify it's public
-  if (!share && calendar.guestPermission === "none") {
+  const hasLiveGuestBundle =
+    !!calendar.guestBundleId &&
+    (await existingBundleIds([calendar.guestBundleId])).size > 0;
+
+  if (!share && !hasLiveGuestBundle) {
     throw new Error("Calendar is not public");
   }
 
-  // Check if subscription exists
   const existingSub = await db.query.userCalendarSubscriptions.findFirst({
     where: and(
       eq(userCalendarSubscriptions.userId, userId),
@@ -526,7 +572,6 @@ export async function undismissCalendar(
   });
 
   if (existingSub) {
-    // Update to subscribed
     await db
       .update(userCalendarSubscriptions)
       .set({
@@ -536,7 +581,6 @@ export async function undismissCalendar(
       })
       .where(eq(userCalendarSubscriptions.id, existingSub.id));
   } else {
-    // Create new subscription
     await db.insert(userCalendarSubscriptions).values({
       userId,
       calendarId,
@@ -606,4 +650,46 @@ export async function getOrphanedCalendars() {
   });
 
   return orphanedCalendars;
+}
+
+// =====================================================
+// Permission bundle seeding
+// =====================================================
+
+export async function listPermissionBundles(
+  calendarId: string
+): Promise<CalendarPermissionBundle[]> {
+  const rows = await db.query.calendarPermissionBundles.findMany({
+    where: eq(calendarPermissionBundles.calendarId, calendarId),
+    orderBy: (bundles, { asc }) => [asc(bundles.createdAt)],
+  });
+  return rows.map(sanitizeBundle);
+}
+
+/**
+ * Inserts the given bundle definitions for a calendar and returns the
+ * created rows. Synchronous (not async) so a caller can seed bundles
+ * atomically with the calendar row itself inside a db.transaction()
+ * callback (see POST /api/calendars) — better-sqlite3 transactions must be
+ * fully synchronous, they reject a callback that returns a promise.
+ * Accepts an optional transaction executor, defaulting to the module-level
+ * db for callers outside a transaction.
+ */
+export function seedPermissionBundles(
+  calendarId: string,
+  definitions: BundleDefinition[],
+  executor: Pick<typeof db, "insert"> = db
+): CalendarPermissionBundle[] {
+  return executor
+    .insert(calendarPermissionBundles)
+    .values(
+      definitions.map((def) => ({
+        calendarId,
+        name: def.name,
+        seedKey: def.seedKey,
+        capabilities: def.capabilities,
+      }))
+    )
+    .returning()
+    .all();
 }

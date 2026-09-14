@@ -21,9 +21,9 @@ import { ApiError } from "@/lib/api-error";
 export interface CalendarUpdateInput {
   name?: string;
   color?: string;
-  guestPermission?: "none" | "read" | "write";
+  /** null = no guest access. Must be a guest-eligible bundle id (E7), enforced server-side. */
+  guestBundleId?: string | null;
   viewSettings?: CalendarViewSettings | null;
-  allowSelfSignup?: boolean;
   signupsEnabled?: boolean;
 }
 
@@ -54,11 +54,7 @@ async function createCalendarApi(
   const response = await fetch("/api/calendars", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name,
-      color,
-      guestPermission: "none",
-    }),
+    body: JSON.stringify({ name, color }),
   });
 
   // Check for rate-limit error first
@@ -177,7 +173,7 @@ export function useCalendars(initialCalendarId?: string | null) {
   }, [selectedCalendar]);
 
   // Access can disappear while the app is open: a dismissed subscription, a
-  // withdrawn share, guestPermission set to none, an expired token. The id would
+  // withdrawn share, guest access turned off, an expired token. The id would
   // otherwise stick and every per-calendar query would keep asking for it.
   useEffect(() => {
     if (!isFetched || isFetching || !selectedCalendar || mutating > 0) return;
@@ -211,7 +207,6 @@ export function useCalendars(initialCalendarId?: string | null) {
         id: `temp-${generateTempId()}`,
         name,
         color,
-        guestPermission: "none",
         ownerId: null,
         createdAt: new Date(),
         updatedAt: new Date(),

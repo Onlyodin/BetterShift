@@ -6,8 +6,27 @@ import {
   userCalendarSubscriptions,
 } from "@/lib/db/schema";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { eq, and, or, ne, isNull } from "drizzle-orm";
+import { eq, and, or, ne, isNotNull, isNull, inArray } from "drizzle-orm";
 import { undismissCalendar } from "@/lib/auth/permissions";
+import {
+  applyGuestCeiling,
+  sanitizeCapabilities,
+  type Capability,
+} from "@/lib/permission-bundles";
+import type { CalendarBundleRef } from "@/lib/types";
+
+/**
+ * A guest bundle's capabilities, ceiling-filtered like every other guest/link
+ * source (5.2). Used for "what would I get" previews of a public calendar's
+ * guest access — deliberately NOT resolveCalendarAccess()/
+ * getEffectiveAccessSummary(), which require an active "subscribed"
+ * subscription and would return no access at all for a calendar the caller
+ * hasn't subscribed to (or has dismissed) yet, exactly the two cases this
+ * preview needs to cover.
+ */
+function previewGuestCapabilities(capabilities: unknown) {
+  return applyGuestCeiling(sanitizeCapabilities(capabilities));
+}
 
 /**
  * GET /api/calendars/subscriptions
@@ -24,10 +43,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Get all public calendars (guestPermission != "none", not owned by user)
+    // Get all public calendars (guestBundleId set, not owned by user)
     const allPublicCalendars = await db.query.calendars.findMany({
       where: and(
-        ne(calendars.guestPermission, "none"),
+        isNotNull(calendars.guestBundleId),
         or(isNull(calendars.ownerId), ne(calendars.ownerId, user.id))
       ),
       with: {
@@ -37,6 +56,9 @@ export async function GET(request: NextRequest) {
             name: true,
             email: true,
           },
+        },
+        guestBundle: {
+          columns: { id: true, name: true, seedKey: true, capabilities: true },
         },
       },
     });
@@ -62,6 +84,9 @@ export async function GET(request: NextRequest) {
     const userShares = await db.query.calendarShares.findMany({
       where: eq(calendarShares.userId, user.id),
       with: {
+        bundle: {
+          columns: { id: true, name: true, seedKey: true, capabilities: true },
+        },
         calendar: {
           with: {
             owner: {
@@ -70,8 +95,25 @@ export async function GET(request: NextRequest) {
                 name: true,
               },
             },
+            guestBundle: {
+              columns: { id: true, name: true, seedKey: true },
+            },
           },
         },
+      },
+    });
+
+    // A share's capabilities come straight from its bundle — shares are never
+    // ceilinged (5.2) — so this avoids a getEffectiveAccessSummary() /
+    // resolveCalendarAccess() re-fetch of the same share row per calendar.
+    const shareAccess = (
+      share: (typeof userShares)[number]
+    ): { capabilities: Capability[]; bundle: CalendarBundleRef } => ({
+      capabilities: sanitizeCapabilities(share.bundle.capabilities),
+      bundle: {
+        id: share.bundle.id,
+        name: share.bundle.name,
+        seedKey: share.bundle.seedKey,
       },
     });
 
@@ -94,7 +136,10 @@ export async function GET(request: NextRequest) {
         id: cal.id,
         name: cal.name,
         color: cal.color,
-        guestPermission: cal.guestPermission,
+        capabilities: cal.guestBundle
+          ? previewGuestCapabilities(cal.guestBundle.capabilities)
+          : [],
+        bundle: cal.guestBundle ?? null,
         owner: cal.owner
           ? {
               id: cal.owner.id,
@@ -105,60 +150,96 @@ export async function GET(request: NextRequest) {
         source: "guest" as const,
       }));
 
-    // Add shared calendars to available list (already filtered for dismissed in activeShares)
-    const sharedCalendars = activeShares.map((share) => ({
-      id: share.calendar.id,
-      name: share.calendar.name,
-      color: share.calendar.color,
-      permission: share.permission, // User's share permission level
-      guestPermission: share.calendar.guestPermission, // Calendar's guest permission (for reference)
-      owner: share.calendar.owner
-        ? {
-            id: share.calendar.owner.id,
-            name: share.calendar.owner.name,
-          }
-        : null,
-      isSubscribed: subscribedIds.has(share.calendarId),
-      source: "shared" as const,
-    }));
+    // Add shared calendars to available list (already filtered for dismissed
+    // in activeShares). A share is unaffected by subscription/dismissal
+    // status, so its bundle always applies.
+    const sharedCalendars = activeShares.map((share) => {
+      const access = shareAccess(share);
+      return {
+        id: share.calendar.id,
+        name: share.calendar.name,
+        color: share.calendar.color,
+        capabilities: access.capabilities,
+        bundle: access.bundle,
+        guestBundle: share.calendar.guestBundle ?? null, // for reference
+        owner: share.calendar.owner
+          ? {
+              id: share.calendar.owner.id,
+              name: share.calendar.owner.name,
+            }
+          : null,
+        isSubscribed: subscribedIds.has(share.calendarId),
+        source: "shared" as const,
+      };
+    });
 
     const availableCalendars = [...publicCalendars, ...sharedCalendars];
 
-    // Build dismissed calendars list (both shared and guest-subscribed)
-    const dismissedCalendars = await Promise.all(
-      dismissedSubs.map(async (sub) => {
-        const calendar = await db.query.calendars.findFirst({
-          where: eq(calendars.id, sub.calendarId),
-          with: {
-            owner: {
-              columns: {
-                id: true,
-                name: true,
+    // Build dismissed calendars list (both shared and guest-subscribed). A
+    // share-backed one uses its bundle directly, same as sharedCalendars
+    // above; a guest-only one previews the guest bundle directly, since
+    // dismissing sets status to "dismissed" and resolveCalendarAccess()
+    // would otherwise report no access at all for it.
+    // Batched (one query for every dismissed calendar) rather than one
+    // findFirst per row — this list scales with how many calendars a user
+    // has dismissed over time, not just their currently-visible ones.
+    const dismissedCalendarIds = dismissedSubs.map((sub) => sub.calendarId);
+    const dismissedCalendarRows =
+      dismissedCalendarIds.length > 0
+        ? await db.query.calendars.findMany({
+            where: inArray(calendars.id, dismissedCalendarIds),
+            with: {
+              owner: {
+                columns: {
+                  id: true,
+                  name: true,
+                },
+              },
+              guestBundle: {
+                columns: {
+                  id: true,
+                  name: true,
+                  seedKey: true,
+                  capabilities: true,
+                },
               },
             },
-          },
-        });
-
-        if (!calendar) return null;
-
-        // Check if it's also a shared calendar
-        const share = userShares.find((s) => s.calendarId === sub.calendarId);
-
-        return {
-          id: calendar.id,
-          name: calendar.name,
-          color: calendar.color,
-          permission: share ? share.permission : calendar.guestPermission,
-          owner: calendar.owner
-            ? {
-                id: calendar.owner.id,
-                name: calendar.owner.name,
-              }
-            : null,
-          source: sub.source,
-        };
-      })
+          })
+        : [];
+    const dismissedCalendarById = new Map(
+      dismissedCalendarRows.map((cal) => [cal.id, cal])
     );
+
+    const dismissedCalendars = dismissedSubs.map((sub) => {
+      const calendar = dismissedCalendarById.get(sub.calendarId);
+      if (!calendar) return null;
+
+      // Check if it's also a shared calendar
+      const share = userShares.find((s) => s.calendarId === sub.calendarId);
+      const access = share ? shareAccess(share) : null;
+
+      const capabilities = access
+        ? access.capabilities
+        : calendar.guestBundle
+          ? previewGuestCapabilities(calendar.guestBundle.capabilities)
+          : [];
+      const bundle = access ? access.bundle : (calendar.guestBundle ?? null);
+
+      return {
+        id: calendar.id,
+        name: calendar.name,
+        color: calendar.color,
+        capabilities,
+        bundle,
+        owner: calendar.owner
+          ? {
+              id: calendar.owner.id,
+              name: calendar.owner.name,
+            }
+          : null,
+        source: sub.source,
+      };
+    });
 
     // Filter out nulls
     const validDismissedCalendars = dismissedCalendars.filter(

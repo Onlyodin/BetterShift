@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { calendarNotes, calendars } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { canViewCalendar, canEditCalendar } from "@/lib/auth/permissions";
+import { hasCapability, hasOwnedCapability } from "@/lib/auth/permissions";
 
 // GET single calendar note
 export async function GET(
@@ -40,7 +40,11 @@ export async function GET(
 
     // Check permissions (works for both authenticated users and guests)
     const user = await getSessionUser(request.headers);
-    const hasAccess = await canViewCalendar(user?.id, calendar.id);
+    const hasAccess = await hasCapability(
+      user?.id,
+      calendar.id,
+      "viewNotesEvents"
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -100,7 +104,13 @@ export async function PUT(
 
     // Check permissions (works for both authenticated users and guests)
     const user = await getSessionUser(request.headers);
-    const hasAccess = await canEditCalendar(user?.id, calendar.id);
+    const hasAccess = await hasOwnedCapability(
+      user?.id,
+      calendar.id,
+      "manageOwnNotesEvents",
+      "manageAnyNotesEvents",
+      existingNote.createdBy
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -193,7 +203,13 @@ export async function DELETE(
 
     // Check permissions (works for both authenticated users and guests)
     const user = await getSessionUser(request.headers);
-    const hasAccess = await canEditCalendar(user?.id, calendar.id);
+    const hasAccess = await hasOwnedCapability(
+      user?.id,
+      calendar.id,
+      "manageOwnNotesEvents",
+      "manageAnyNotesEvents",
+      existingNote.createdBy
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },

@@ -1,19 +1,13 @@
 "use client";
 
-import { ReactNode, useState } from "react";
+import { useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { format, formatDistanceToNow } from "date-fns";
 import { Eye, EyeOff, Link as LinkIcon, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog";
 import { ListRow, Pill, RowIconButton, SectionLabel } from "@/components/form-kit";
-import { PanelBody, PanelFooter } from "@/components/panel-dialog";
-import {
-  AccessLinkCreateForm,
-  AccessLinkCreated,
-} from "@/components/calendar-token-create-dialog";
+import { useBundleDisplayName } from "@/components/permission-bundle-picker";
 import { useCalendarTokens, type CalendarAccessToken } from "@/hooks/useCalendarTokens";
-import type { useAccessLinkForm } from "@/hooks/useAccessLinkForm";
 import { getDateLocale } from "@/lib/locales";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +29,7 @@ function TokenRow({
   onRevoke: () => void;
 }) {
   const t = useTranslations();
+  const displayName = useBundleDisplayName();
   const dateLocale = getDateLocale(useLocale());
   const expired = isExpired(token);
   const dimmed = expired || !token.isActive;
@@ -85,11 +80,7 @@ function TokenRow({
         </div>
         <div className="truncate text-[12px] text-fg-tertiary">{usage}</div>
       </div>
-      {token.permission === "write" ? (
-        <Pill tone="warning">{t("sharingSheet.permWrite")}</Pill>
-      ) : (
-        <Pill>{t("sharingSheet.permRead")}</Pill>
-      )}
+      <Pill>{displayName(token.bundle) ?? t("common.labels.permissions.none")}</Pill>
       <RowIconButton
         icon={token.isActive ? EyeOff : Eye}
         label={token.isActive ? t("token.disable") : t("token.enable")}
@@ -154,58 +145,6 @@ export function CalendarTokenList({ calendarId }: { calendarId: string }) {
           confirmVariant="destructive"
         />
       )}
-    </>
-  );
-}
-
-/**
- * Access links (screens 9a/9b). The owner holds `form` so its input survives tab
- * switches; `leading` renders above the list, e.g. a tab switcher.
- */
-export function AccessLinksPanel({
-  calendarId,
-  form,
-  onClose,
-  leading,
-}: {
-  calendarId: string;
-  form: ReturnType<typeof useAccessLinkForm>;
-  onClose: () => void;
-  leading?: ReactNode;
-}) {
-  const t = useTranslations();
-
-  if (form.created) {
-    return (
-      <>
-        <PanelBody>
-          <AccessLinkCreated created={form.created} />
-        </PanelBody>
-        <PanelFooter>
-          <Button variant="outline" className="h-10 flex-1 font-semibold" onClick={form.reset}>
-            {t("common.close")}
-          </Button>
-        </PanelFooter>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <PanelBody className="flex flex-col gap-3.5">
-        {leading}
-        <CalendarTokenList calendarId={calendarId} />
-        <div className="h-px shrink-0 bg-line" />
-        <AccessLinkCreateForm form={form} />
-      </PanelBody>
-      <PanelFooter>
-        <Button variant="outline" className="h-10 flex-1 font-semibold" onClick={onClose}>
-          {t("common.cancel")}
-        </Button>
-        <Button className="h-10 flex-1 font-semibold" onClick={form.create} disabled={form.creating}>
-          {form.creating ? t("sharingSheet.creating") : t("sharingSheet.createLink")}
-        </Button>
-      </PanelFooter>
     </>
   );
 }

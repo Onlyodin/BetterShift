@@ -6,9 +6,14 @@ import {
   userCalendarSubscriptions,
 } from "@/lib/db/schema";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { checkPermission } from "@/lib/auth/permissions";
+import { getCalendarAccess, hasCapability } from "@/lib/auth/permissions";
+import {
+  assertBundleWithinCallerCapabilities,
+  getBundleForCalendar,
+  handleBundleServiceError,
+} from "@/lib/auth/permission-bundles-service";
 import { eq, and } from "drizzle-orm";
-import { logAuditEvent } from "@/lib/audit-log";
+import { logAuditEvent, type CalendarSharedMetadata } from "@/lib/audit-log";
 
 export async function GET(
   request: NextRequest,
@@ -19,7 +24,11 @@ export async function GET(
     const user = await getSessionUser(request.headers);
 
     // Check if user has admin/owner permission
-    const hasPermission = await checkPermission(user?.id, calendarId, "admin");
+    const hasPermission = await hasCapability(
+      user?.id,
+      calendarId,
+      "manageShares"
+    );
     if (!hasPermission) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -44,6 +53,13 @@ export async function GET(
             id: true,
             name: true,
             email: true,
+          },
+        },
+        bundle: {
+          columns: {
+            id: true,
+            name: true,
+            seedKey: true,
           },
         },
       },
@@ -73,8 +89,8 @@ export async function POST(
     }
 
     // Check if user has admin/owner permission
-    const hasPermission = await checkPermission(user.id, calendarId, "admin");
-    if (!hasPermission) {
+    const access = await getCalendarAccess(user.id, calendarId);
+    if (!access?.can("manageShares")) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
         { status: 403 }
@@ -82,7 +98,7 @@ export async function POST(
     }
 
     const body = await request.json();
-    const { userId: targetUserId, permission } = body;
+    const { userId: targetUserId, bundleId } = body;
 
     // Validate target user id
     if (!targetUserId || typeof targetUserId !== "string") {
@@ -92,26 +108,18 @@ export async function POST(
       );
     }
 
-    // Validate permission value. "owner" is intentionally excluded — ownership
-    // transfer is not a share concept and only happens through admin routes.
-    const validPermissions = ["admin", "write", "read"];
-    if (!validPermissions.includes(permission)) {
-      return NextResponse.json(
-        { error: "Invalid permission value" },
-        { status: 400 }
-      );
+    // Validate the bundle: must exist and belong to this calendar.
+    if (!bundleId || typeof bundleId !== "string") {
+      return NextResponse.json({ error: "Invalid bundle id" }, { status: 400 });
     }
-
-    // Only owner can grant admin permissions
-    if (permission === "admin") {
-      const isOwner = await checkPermission(user.id, calendarId, "owner");
-      if (!isOwner) {
-        return NextResponse.json(
-          { error: "Only the owner can grant admin permissions" },
-          { status: 403 }
-        );
-      }
+    const bundle = await getBundleForCalendar(calendarId, bundleId);
+    if (!bundle) {
+      return NextResponse.json({ error: "Bundle not found" }, { status: 404 });
     }
+    // A non-owner manageShares holder may only grant a bundle whose
+    // capabilities are a subset of their own — closes the self-escalation
+    // path a fixed cap used to guard against pre-PR.
+    assertBundleWithinCallerCapabilities(access, bundle.capabilities);
 
     // Ensure the target user actually exists
     const targetUserExists = await db.query.user.findFirst({
@@ -188,23 +196,25 @@ export async function POST(
         id: crypto.randomUUID(),
         calendarId,
         userId: targetUserId,
-        permission,
+        bundleId: bundle.id,
         sharedBy: user.id,
         createdAt: new Date(),
       })
       .returning();
 
     // Log audit event
-    await logAuditEvent({
+    await logAuditEvent<CalendarSharedMetadata>({
       userId: user.id,
       action: "calendar.shared",
+      resourceType: "calendar",
+      resourceId: calendarId,
       severity: "info",
       request,
       metadata: {
-        calendarId,
         calendarName: calendar?.name || "Unknown",
         sharedWith: targetUser?.email || targetUser?.name || targetUserId,
-        permission,
+        bundleId: bundle.id,
+        bundleName: bundle.name,
       },
     });
 
@@ -227,15 +237,14 @@ export async function POST(
             email: true,
           },
         },
+        bundle: {
+          columns: { id: true, name: true, seedKey: true },
+        },
       },
     });
 
     return NextResponse.json(shareWithUser, { status: 201 });
   } catch (error) {
-    console.error("Failed to create calendar share:", error);
-    return NextResponse.json(
-      { error: "Failed to create share" },
-      { status: 500 }
-    );
+    return handleBundleServiceError(error, "Failed to create share");
   }
 }

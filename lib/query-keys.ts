@@ -55,6 +55,8 @@ export const queryKeys = {
       list: (params: object) => ["admin", "calendars", "list", params] as const,
       detail: (calendarId: string) =>
         ["admin", "calendars", "detail", calendarId] as const,
+      bundles: (calendarId: string) =>
+        ["admin", "calendars", "bundles", calendarId] as const,
     },
     auditLogsAll: ["admin", "audit-logs"] as const,
     auditLogs: (filters?: object) => ["admin", "audit-logs", filters] as const,
@@ -67,6 +69,10 @@ export const queryKeys = {
   },
   tokens: {
     byCalendar: (calendarId: string) => ["tokens", calendarId] as const,
+  },
+  permissionBundles: {
+    byCalendar: (calendarId: string) =>
+      ["permission-bundles", calendarId] as const,
   },
   subscriptions: {
     all: ["subscriptions"] as const,

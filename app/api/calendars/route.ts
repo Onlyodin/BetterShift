@@ -7,8 +7,11 @@ import {
   userCalendarSubscriptions,
 } from "@/lib/db/schema";
 import { sql, eq, or, and } from "drizzle-orm";
+import {
+  getUserAccessibleCalendars,
+  seedPermissionBundles,
+} from "@/lib/auth/permissions";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { getUserAccessibleCalendars } from "@/lib/auth/permissions";
 import { isAuthEnabled } from "@/lib/auth/feature-flags";
 import { rateLimit } from "@/lib/rate-limiter";
 import { logUserAction, type CalendarCreatedMetadata } from "@/lib/audit-log";
@@ -16,6 +19,14 @@ import {
   getTokensFromCookie,
   validateAccessToken,
 } from "@/lib/auth/token-auth";
+import {
+  applyGuestCeiling,
+  CAPABILITIES,
+  defaultBundleDefinitionsForNewCalendar,
+  sanitizeCapabilities,
+  type Capability,
+} from "@/lib/permission-bundles";
+import type { CalendarBundleRef } from "@/lib/types";
 
 // GET all calendars (only those accessible to the user)
 export async function GET(request: Request) {
@@ -37,8 +48,7 @@ export async function GET(request: Request) {
         name: calendars.name,
         color: calendars.color,
         ownerId: calendars.ownerId,
-        guestPermission: calendars.guestPermission,
-        allowSelfSignup: calendars.allowSelfSignup,
+        guestBundleId: calendars.guestBundleId,
         signupsEnabled: calendars.signupsEnabled,
         viewSettings: calendars.viewSettings,
         createdAt: calendars.createdAt,
@@ -55,16 +65,17 @@ export async function GET(request: Request) {
     // If user is authenticated, fetch additional metadata
     let subscriptions: Map<string, { status: string; source: string }> =
       new Map();
-    let shares: Map<string, string> = new Map();
-    const tokens: Map<string, "read" | "write"> = new Map();
+    let shares: Map<string, string> = new Map(); // calendarId -> bundleId
 
-    // Get token permissions (works for both guests and authenticated users)
+    // Get token bundles (works for both guests and authenticated users)
+    const tokens: Map<string, string> = new Map(); // calendarId -> bundleId
     const userTokens = await getTokensFromCookie();
     for (const tokenData of userTokens) {
-      // Validate token is still valid
+      // Validate token is still valid — use the freshly validated bundle,
+      // not the cookie's own (possibly stale) copy
       const validation = await validateAccessToken(tokenData.token);
       if (validation && validation.calendarId === tokenData.calendarId) {
-        tokens.set(tokenData.calendarId, tokenData.permission);
+        tokens.set(tokenData.calendarId, validation.bundleId);
       }
     }
 
@@ -87,27 +98,93 @@ export async function GET(request: Request) {
       const userShares = await db.query.calendarShares.findMany({
         where: eq(sql`${calendarShares.userId}`, user.id),
       });
-      shares = new Map(userShares.map((s) => [s.calendarId, s.permission]));
+      shares = new Map(userShares.map((s) => [s.calendarId, s.bundleId]));
     }
 
-    // Enrich calendars with permission metadata
+    // Batch-resolve every bundle involved (guest, share, token) to its
+    // capabilities + identity, so the per-calendar enrichment below is a
+    // plain in-memory lookup instead of one resolveCalendarAccess() per
+    // calendar (which would re-run the calendar/share/token/subscription
+    // lookups already done above, once per row).
+    const bundleIds = new Set<string>();
+    for (const cal of userCalendars) {
+      if (cal.guestBundleId) bundleIds.add(cal.guestBundleId);
+    }
+    for (const bundleId of shares.values()) bundleIds.add(bundleId);
+    for (const bundleId of tokens.values()) bundleIds.add(bundleId);
+    const bundleRows =
+      bundleIds.size > 0
+        ? await db.query.calendarPermissionBundles.findMany({
+            where: (b, { inArray }) => inArray(b.id, Array.from(bundleIds)),
+            columns: { id: true, name: true, seedKey: true, capabilities: true },
+          })
+        : [];
+    const capabilitiesByBundleId = new Map(
+      bundleRows.map((row) => [row.id, sanitizeCapabilities(row.capabilities)])
+    );
+    const bundleRefById = new Map<string, CalendarBundleRef>(
+      bundleRows.map((row) => [
+        row.id,
+        { id: row.id, name: row.name, seedKey: row.seedKey },
+      ])
+    );
+
+    // Enrich calendars with the caller's effective capabilities for that
+    // calendar (share > token > subscribed guest bundle for authenticated
+    // users; token > guest bundle for guests), matching the priority in
+    // resolveCalendarAccess() — computed here in-memory from the batched
+    // lookups above instead of re-resolving per calendar.
     const enrichedCalendars = userCalendars.map((cal) => {
-      const share = shares.get(cal.id);
+      const shareBundleId = shares.get(cal.id);
       const subscription = subscriptions.get(cal.id);
-      const token = tokens.get(cal.id);
+      const tokenBundleId = tokens.get(cal.id);
+      const isOwnerRow = !isAuthEnabled() || cal.ownerId === user?.id;
+
+      let capabilities: Capability[];
+      let bundle: CalendarBundleRef | null;
+      if (isOwnerRow) {
+        capabilities = [...CAPABILITIES];
+        bundle = null;
+      } else if (shareBundleId) {
+        // Invited users (source "share") are never ceilinged — see 5.2.
+        capabilities = capabilitiesByBundleId.get(shareBundleId) ?? [];
+        bundle = bundleRefById.get(shareBundleId) ?? null;
+      } else if (tokenBundleId) {
+        capabilities = applyGuestCeiling(capabilitiesByBundleId.get(tokenBundleId) ?? []);
+        bundle = bundleRefById.get(tokenBundleId) ?? null;
+      } else if (cal.guestBundleId && (!user || subscription)) {
+        capabilities = applyGuestCeiling(
+          capabilitiesByBundleId.get(cal.guestBundleId) ?? []
+        );
+        bundle = bundleRefById.get(cal.guestBundleId) ?? null;
+      } else {
+        capabilities = [];
+        bundle = null;
+      }
 
       // Determine subscription source
       let subscriptionSource: "guest" | "shared" | "token" | undefined =
         subscription?.source as "guest" | "shared" | undefined;
-      if (token && !share && !subscription) {
+      if (tokenBundleId && !shareBundleId && !subscription) {
         subscriptionSource = "token";
       }
 
+      // Mirrors getShiftSignupPermission() using the capabilities already
+      // resolved above, instead of a second resolveCalendarAccess() per row.
+      const canSignUp = (capability: "signUpSelf" | "signUpOthers"): boolean => {
+        if (!cal.signupsEnabled) return false;
+        if (isOwnerRow) return true;
+        if (!user?.id) return false;
+        return capabilities.includes(capability);
+      };
+
       return {
         ...cal,
-        sharePermission: share || undefined,
-        tokenPermission: token || undefined,
-        isSubscribed: !!subscription || !!token,
+        capabilities,
+        bundle,
+        canSignUpSelf: canSignUp("signUpSelf"),
+        canSignUpOthers: canSignUp("signUpOthers"),
+        isSubscribed: !!subscription || !!tokenBundleId,
         subscriptionSource,
       };
     });
@@ -140,7 +217,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { name, color, guestPermission } = body;
+    const { name, color } = body;
 
     if (!name) {
       return NextResponse.json(
@@ -149,15 +226,35 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const [calendar] = await db
-      .insert(calendars)
-      .values({
-        name,
-        color: color || "#3b82f6",
-        ownerId: user?.id || null, // Set current user as owner (or null if auth disabled)
-        guestPermission: guestPermission || "none",
-      })
-      .returning();
+    // Insert and bundle-seeding happen atomically: a calendar must never
+    // exist even briefly without its four recommended bundles, since every
+    // permission check assumes they're already there. better-sqlite3
+    // transactions must be synchronous (no async/await inside), see
+    // seedPermissionBundles().
+    const calendar = db.transaction((tx) => {
+      const calendar = tx
+        .insert(calendars)
+        .values({
+          name,
+          color: color || "#3b82f6",
+          ownerId: user?.id || null, // Set current user as owner (or null if auth disabled)
+        })
+        .returning()
+        .get();
+
+      // Every calendar always ships with the four recommended bundles, so
+      // it's never "configured from nothing" — see lib/permission-bundles.ts.
+      seedPermissionBundles(
+        calendar.id,
+        defaultBundleDefinitionsForNewCalendar(),
+        tx
+      );
+
+      return calendar;
+    });
+
+    // Guest access is not configurable at creation time — set it afterwards
+    // via PATCH /api/calendars/[id], same as any other bundle assignment.
 
     // Log calendar creation event
     if (user) {

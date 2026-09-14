@@ -23,7 +23,7 @@ import { CalendarViewPanel, ViewSettingsState } from "@/components/view-settings
 import { PresetsPanel } from "@/components/preset-manage-sheet";
 import { ExternalSyncPanel } from "@/components/external-sync-manage-sheet";
 import { SyncNotificationsPanel } from "@/components/sync-notification-dialog";
-import { SharingPanel } from "@/components/calendar-share-management-sheet";
+import { PermissionsPanel } from "@/components/calendar-permissions-panel";
 import { isUsableToken } from "@/components/calendar-token-list";
 import { useCalendars } from "@/hooks/useCalendars";
 import { useCalendarPermission } from "@/hooks/useCalendarPermission";
@@ -39,7 +39,7 @@ export type SettingsSection =
   | "general"
   | "presets"
   | "external"
-  | "sharing"
+  | "permissions"
   | "export"
   | "view"
   | "notifications";
@@ -182,21 +182,25 @@ export function useCalendarSettings(calendarId: string | null) {
   const permission = useCalendarPermission(calendarId);
   const { isAuthEnabled } = useAuthFeatures();
   const { presets } = usePresets(calendarId ?? undefined);
+  const canOpenExternal = permission.can("manageExternalSync");
   const { externalSyncs, hasSyncErrors } = useExternalSync(
-    permission.canManage ? calendarId : null
+    canOpenExternal ? calendarId : null
   );
-  const { tokens } = useCalendarTokens(permission.canShare ? calendarId : null);
+  const canOpenPermissions =
+    permission.can("manageShares") || permission.can("manageGuestAccess");
+  const { tokens } = useCalendarTokens(canOpenPermissions ? calendarId : null);
 
   const items: SettingsItem[] = [];
   if (!calendar) return { calendar, items };
-  if (permission.canManage)
+  if (permission.can("manageCalendarSettings"))
     items.push({
       id: "general",
       icon: Palette,
       title: t("settings.general"),
       description: t("settings.generalHint"),
     });
-  if (permission.canEdit)
+  // Matches PresetsPanel's own "no preset capability at all" gate.
+  if (permission.can("createPreset") || permission.can("manageOwnPresets"))
     items.push({
       id: "presets",
       icon: Layers,
@@ -204,7 +208,7 @@ export function useCalendarSettings(calendarId: string | null) {
       description: t("settings.presetsHint", { count: presets.length }),
       meta: presets.length,
     });
-  if (permission.canManage)
+  if (canOpenExternal)
     items.push({
       id: "external",
       icon: RefreshCw,
@@ -212,12 +216,14 @@ export function useCalendarSettings(calendarId: string | null) {
       description: t("settings.externalHint", { count: externalSyncs.length }),
       meta: externalSyncs.length,
     });
-  if (isAuthEnabled && permission.canShare)
+  // S2: the panel is worth opening with either capability — it self-gates each
+  // section (manageShares for people, manageGuestAccess for guest/links).
+  if (isAuthEnabled && canOpenPermissions)
     items.push({
-      id: "sharing",
+      id: "permissions",
       icon: Users,
-      title: t("settings.sharing"),
-      description: t("settings.sharingHint", { count: tokens.filter(isUsableToken).length }),
+      title: t("settings.permissions"),
+      description: t("settings.permissionsHint", { count: tokens.filter(isUsableToken).length }),
     });
   items.push(
     {
@@ -236,7 +242,7 @@ export function useCalendarSettings(calendarId: string | null) {
   );
   // Sync notifications manage external syncs, so they need the same permission
   // tier as that section — guests only ever get read/write, never manage.
-  if (permission.canManage)
+  if (canOpenExternal)
     items.push({
       id: "notifications",
       icon: Bell,
@@ -295,8 +301,8 @@ export function CalendarSettingsPanel({
           onDirtyChange={onDirtyChange}
         />
       );
-    case "sharing":
-      return <SharingPanel calendarId={calendarId} onClose={onCancel} onDirtyChange={onDirtyChange} />;
+    case "permissions":
+      return <PermissionsPanel calendarId={calendarId} onClose={onCancel} onDirtyChange={onDirtyChange} />;
     case "export":
       return <ExportPanel calendarId={calendarId} onClose={onClose} />;
     case "view":

@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { shiftPresets, calendars } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { canEditCalendar } from "@/lib/auth/permissions";
+import { hasCapability } from "@/lib/auth/permissions";
 
 // PATCH reorder presets
 export async function PATCH(request: NextRequest) {
@@ -49,8 +49,14 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    // Check edit permission (works for both authenticated users and guests)
-    const hasAccess = await canEditCalendar(user?.id, calendarId);
+    // Check edit permission (works for both authenticated users and guests).
+    // Reordering changes the shared order for everyone, so it always needs
+    // manageAnyPresets — manageOwnPresets alone isn't enough (5.1).
+    const hasAccess = await hasCapability(
+      user?.id,
+      calendarId,
+      "manageAnyPresets"
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },

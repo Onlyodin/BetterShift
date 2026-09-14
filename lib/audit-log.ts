@@ -71,14 +71,15 @@ export interface CalendarDeletedMetadata {
 
 export interface CalendarUpdatedMetadata {
   calendarName: string;
-  changes: string[]; // e.g., ["name", "color", "guestPermission", "viewSettings"]
+  changes: string[]; // e.g., ["name", "color", "guestBundleId", "viewSettings"]
   viewSettings?: "enabled" | "updated" | "disabled";
 }
 
 export interface CalendarSharedMetadata {
   calendarName: string;
   sharedWith: string; // user email
-  permission: "read" | "write" | "admin";
+  bundleId: string;
+  bundleName: string;
 }
 
 export interface CalendarShareRemovedMetadata {
@@ -90,14 +91,27 @@ export interface CalendarShareRemovedMetadata {
 export interface CalendarPermissionChangedMetadata {
   calendarName: string;
   user: string;
-  oldPermission: string;
-  newPermission: string;
+  oldBundleId: string;
+  oldBundleName: string;
+  newBundleId: string;
+  newBundleName: string;
 }
 
-export interface CalendarGuestPermissionChangedMetadata {
+export interface CalendarGuestBundleChangedMetadata {
   calendarName: string;
-  oldPermission: "none" | "read" | "write";
-  newPermission: "none" | "read" | "write";
+  oldBundleId: string | null;
+  oldBundleName: string | null;
+  newBundleId: string | null;
+  newBundleName: string | null;
+}
+
+export interface CalendarTokenCreatedMetadata {
+  tokenId: string;
+  tokenName: string;
+  calendarName: string;
+  bundleId: string;
+  bundleName: string;
+  expiresAt: string | null;
 }
 
 export interface SyncCreatedMetadata {
@@ -154,6 +168,31 @@ export interface AdminUserCreateMetadata {
   createdBy: string;
 }
 
+export interface CalendarBundleCreatedMetadata {
+  calendarName: string;
+  bundleName: string;
+  capabilities: string[];
+}
+
+export interface CalendarBundleUpdatedMetadata {
+  calendarName: string;
+  bundleName: string;
+  addedCapabilities: string[];
+  removedCapabilities: string[];
+  renamed?: { from: string; to: string };
+}
+
+export interface CalendarBundleClonedMetadata {
+  calendarName: string;
+  sourceBundleName: string;
+  newBundleName: string;
+}
+
+export interface CalendarBundleDeletedMetadata {
+  calendarName: string;
+  bundleName: string;
+}
+
 // Union type for all metadata
 export type AuditLogMetadata =
   | LoginFailedMetadata
@@ -167,6 +206,8 @@ export type AuditLogMetadata =
   | CalendarSharedMetadata
   | CalendarShareRemovedMetadata
   | CalendarPermissionChangedMetadata
+  | CalendarGuestBundleChangedMetadata
+  | CalendarTokenCreatedMetadata
   | SyncCreatedMetadata
   | SyncDeletedMetadata
   | SyncExecutedMetadata
@@ -175,7 +216,11 @@ export type AuditLogMetadata =
   | AdminUserCreateMetadata
   | AdminCalendarTransferMetadata
   | AdminPasswordResetMetadata
-  | AdminSystemSettingsUpdatedMetadata;
+  | AdminSystemSettingsUpdatedMetadata
+  | CalendarBundleCreatedMetadata
+  | CalendarBundleUpdatedMetadata
+  | CalendarBundleClonedMetadata
+  | CalendarBundleDeletedMetadata;
 
 // =====================================================
 // Audit Log Types

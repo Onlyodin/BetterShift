@@ -42,7 +42,14 @@ interface CalendarWorkspaceProps {
   showShiftNotes: boolean;
   highlightedWeekdays: number[];
   highlightColor: string;
-  canEdit: boolean;
+  /** createShift — gates stamping and the "add a new shift" affordances */
+  canCreateShift: boolean;
+  /** manageOwnNotesEvents — creating a note/event only ever needs "own" */
+  canAddNote: boolean;
+  /** Per-shift own/any precision (editOwnShift/editAnyShift) for the edit affordance */
+  canEditShift: (shift: ShiftWithCalendar) => boolean;
+  /** Per-shift own/any precision (deleteOwnShift/deleteAnyShift) for the delete affordance */
+  canDeleteShift: (shift: ShiftWithCalendar) => boolean;
   showStampBar: boolean;
   selectedPresetIds: string[];
   onSelectPreset: (id: string | undefined, multiSelect?: boolean) => void;
@@ -70,7 +77,10 @@ export function CalendarWorkspace({
   showShiftNotes,
   highlightedWeekdays,
   highlightColor,
-  canEdit,
+  canCreateShift,
+  canAddNote,
+  canEditShift,
+  canDeleteShift,
   showStampBar,
   selectedPresetIds,
   onSelectPreset,
@@ -103,7 +113,7 @@ export function CalendarWorkspace({
     shifts,
   });
 
-  const stampingEnabled = canEdit && isOnline && showStampBar;
+  const stampingEnabled = canCreateShift && isOnline && showStampBar;
   const stampPresetIds = useMemo(
     () => orderStampPresets(presets).map((p) => p.id),
     [presets]
@@ -120,7 +130,10 @@ export function CalendarWorkspace({
     currentDate,
     ...dayData,
     summary: monthSummary,
-    canEdit: canEdit && isOnline,
+    canAddShift: canCreateShift && isOnline,
+    canAddNote: canAddNote && isOnline,
+    canEditShift: (shift) => canEditShift(shift) && isOnline,
+    canDeleteShift: (shift) => canDeleteShift(shift) && isOnline,
   };
 
   const banners = (
@@ -135,7 +148,7 @@ export function CalendarWorkspace({
         </StatusBanner>
       )}
       {isGuest && <GuestBanner variant={desktop ? "default" : "compact"} />}
-      {!canEdit && !isGuest && calendarId && (
+      {!canCreateShift && !isGuest && calendarId && (
         <ReadOnlyBanner
           title={t("calendarView.readOnlyTitle")}
           message={t("calendarView.readOnlyMessage")}
@@ -143,7 +156,7 @@ export function CalendarWorkspace({
       )}
     </>
   );
-  const hasBanner = !isOnline || isGuest || (!canEdit && !!calendarId);
+  const hasBanner = !isOnline || isGuest || (!canCreateShift && !!calendarId);
 
   const grid = (
     <MonthGrid
@@ -160,7 +173,7 @@ export function CalendarWorkspace({
       highlightedWeekdays={highlightedWeekdays}
       highlightColor={highlightColor}
       onDayClick={onDayClick}
-      onDayContextMenu={canEdit ? onDayContextMenu : undefined}
+      onDayContextMenu={canAddNote ? onDayContextMenu : undefined}
     />
   );
 
@@ -230,7 +243,7 @@ export function CalendarWorkspace({
             setPeriod("month");
             setStatsOpen(true);
           }}
-          onAddShift={model.canEdit ? actions.onAddShift : undefined}
+          onAddShift={model.canAddShift ? actions.onAddShift : undefined}
         />
       </div>
       <MobileDaySheet

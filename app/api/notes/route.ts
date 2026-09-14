@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { calendarNotes, calendars } from "@/lib/db/schema";
 import { eq, and, gte, lte } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { canViewCalendar, canEditCalendar } from "@/lib/auth/permissions";
+import { hasCapability, hasOwnedCapability } from "@/lib/auth/permissions";
 import { parseLocalDate } from "@/lib/date-utils";
 
 // GET calendar notes for a calendar (with optional date filter)
@@ -35,7 +35,7 @@ export async function GET(request: Request) {
 
     // Check permissions (works for both authenticated users and guests)
     const user = await getSessionUser(request.headers);
-    const hasAccess = await canViewCalendar(user?.id, calendar.id);
+    const hasAccess = await hasCapability(user?.id, calendar.id, "viewNotesEvents");
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -129,9 +129,18 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check permissions (works for both authenticated users and guests)
+    // Check permissions (works for both authenticated users and guests).
+    // Creating needs either capability — own vs. any only matters once the
+    // note exists, for editing/deleting it. The caller is the note's future
+    // creator, so passing their id as createdBy folds that check in too.
     const user = await getSessionUser(request.headers);
-    const hasAccess = await canEditCalendar(user?.id, calendar.id);
+    const hasAccess = await hasOwnedCapability(
+      user?.id,
+      calendar.id,
+      "manageOwnNotesEvents",
+      "manageAnyNotesEvents",
+      user?.id ?? null
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -159,6 +168,7 @@ export async function POST(request: Request) {
         color: color || null,
         recurringPattern: recurringPattern || "none",
         recurringInterval: recurringInterval || null,
+        createdBy: user?.id ?? null,
       })
       .returning();
 

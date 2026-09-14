@@ -16,8 +16,8 @@ import { eq, sql } from "drizzle-orm";
 import {
   requireAdmin,
   requireSuperAdmin,
-  canEditCalendar,
-  canDeleteCalendar,
+  siteAdminCanEditCalendar,
+  siteAdminCanDeleteCalendar,
 } from "@/lib/auth/admin";
 import { logAuditEvent } from "@/lib/audit-log";
 import { rateLimit } from "@/lib/rate-limiter";
@@ -25,6 +25,10 @@ import {
   getValidatedAdminUser,
   isErrorResponse,
 } from "@/lib/auth/admin-helpers";
+import {
+  getBundleForCalendar,
+  resolveGuestEligibleBundle,
+} from "@/lib/auth/permission-bundles-service";
 
 /**
  * Admin Calendar Detail API
@@ -33,7 +37,7 @@ import {
  * Returns detailed information about a specific calendar.
  *
  * PATCH /api/admin/calendars/[id]
- * Updates calendar information (name, color, guestPermission).
+ * Updates calendar information (name, color, guestBundleId).
  * - Admin & Superadmin: Can update calendars
  * - Cannot change ownerId via PATCH (use transfer endpoint)
  *
@@ -68,7 +72,7 @@ export async function GET(
         name: calendarsTable.name,
         color: calendarsTable.color,
         ownerId: calendarsTable.ownerId,
-        guestPermission: calendarsTable.guestPermission,
+        guestBundleId: calendarsTable.guestBundleId,
         createdAt: sql<string>`${calendarsTable.createdAt}`,
         updatedAt: sql<string>`${calendarsTable.updatedAt}`,
         ownerName: userTable.name,
@@ -112,7 +116,7 @@ export async function GET(
       .select({
         id: calendarSharesTable.id,
         userId: calendarSharesTable.userId,
-        permission: calendarSharesTable.permission,
+        bundleId: calendarSharesTable.bundleId,
         createdAt: calendarSharesTable.createdAt,
         userName: userTable.name,
         userEmail: userTable.email,
@@ -127,7 +131,7 @@ export async function GET(
       .select({
         id: tokensTable.id,
         name: tokensTable.name,
-        permission: tokensTable.permission,
+        bundleId: tokensTable.bundleId,
         createdAt: sql<string>`${tokensTable.createdAt}`,
       })
       .from(tokensTable)
@@ -174,6 +178,28 @@ export async function GET(
       .from(externalSyncsTable)
       .where(eq(externalSyncsTable.calendarId, calendarId));
 
+    // Batch-resolve every bundle involved (guest, shares, tokens) to its
+    // {id, name, seedKey} for display — the admin panel now shows the
+    // owner-defined bundle directly instead of a collapsed read/write/admin
+    // tier (Paket 6). Shares/tokens always resolve (bundleId is a restrict
+    // FK); a guest bundle can be orphaned (no FK, see 4.2 in the plan) and
+    // then correctly falls back to null, i.e. "no guest access".
+    const bundleIds = new Set<string>();
+    if (calendar.guestBundleId) bundleIds.add(calendar.guestBundleId);
+    for (const s of shares) bundleIds.add(s.bundleId);
+    for (const t of shareTokens) bundleIds.add(t.bundleId);
+    const bundleRows =
+      bundleIds.size > 0
+        ? await db.query.calendarPermissionBundles.findMany({
+            where: (b, { inArray }) => inArray(b.id, Array.from(bundleIds)),
+            columns: { id: true, name: true, seedKey: true },
+          })
+        : [];
+    const bundleById = new Map(bundleRows.map((b) => [b.id, b]));
+    const guestBundle = calendar.guestBundleId
+      ? (bundleById.get(calendar.guestBundleId) ?? null)
+      : null;
+
     return NextResponse.json({
       id: calendar.id,
       name: calendar.name,
@@ -186,7 +212,7 @@ export async function GET(
             image: calendar.ownerImage,
           }
         : null,
-      guestPermission: calendar.guestPermission,
+      guestBundle,
       createdAt: calendar.createdAt ? new Date(calendar.createdAt) : new Date(),
       updatedAt: calendar.updatedAt ? new Date(calendar.updatedAt) : new Date(),
       shiftsCount: Number(shiftCount?.count || 0),
@@ -200,12 +226,12 @@ export async function GET(
         userName: s.userName || "",
         userEmail: s.userEmail || "",
         userImage: s.userImage,
-        permission: s.permission,
+        bundle: bundleById.get(s.bundleId) ?? { id: s.bundleId, name: "?", seedKey: null },
       })),
       shareTokens: shareTokens.map((t) => ({
         id: t.id,
         name: t.name,
-        permission: t.permission,
+        bundle: bundleById.get(t.bundleId) ?? { id: t.bundleId, name: "?", seedKey: null },
         createdAt: t.createdAt ? new Date(t.createdAt) : new Date(),
       })),
       externalSyncs: externalSyncsWithLastSync,
@@ -246,7 +272,7 @@ export async function PATCH(
     );
     if (rateLimitResponse) return rateLimitResponse;
 
-    if (!canEditCalendar(currentUser)) {
+    if (!siteAdminCanEditCalendar(currentUser)) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
         { status: 403 }
@@ -270,8 +296,9 @@ export async function PATCH(
     const updates: {
       name?: string;
       color?: string;
-      guestPermission?: "none" | "read" | "write";
+      guestBundleId?: string | null;
     } = {};
+    const changes: string[] = [];
 
     // Validate and collect allowed updates
     if (body.name !== undefined) {
@@ -282,6 +309,7 @@ export async function PATCH(
         );
       }
       updates.name = body.name.trim();
+      changes.push("name");
     }
 
     if (body.color !== undefined) {
@@ -292,16 +320,29 @@ export async function PATCH(
         );
       }
       updates.color = body.color;
+      changes.push("color");
     }
 
-    if (body.guestPermission !== undefined) {
-      if (!["none", "read", "write"].includes(body.guestPermission)) {
+    let newGuestBundle: Awaited<ReturnType<typeof resolveGuestEligibleBundle>> | null =
+      null;
+    if (body.guestBundleId !== undefined) {
+      if (body.guestBundleId === null) {
+        updates.guestBundleId = null;
+      } else if (typeof body.guestBundleId === "string") {
+        newGuestBundle = await resolveGuestEligibleBundle(
+          calendarId,
+          body.guestBundleId,
+          "Bundle contains capabilities that cannot be granted to guests"
+        );
+        if (newGuestBundle instanceof NextResponse) return newGuestBundle;
+        updates.guestBundleId = body.guestBundleId;
+      } else {
         return NextResponse.json(
-          { error: "Invalid guest permission" },
+          { error: "Invalid guestBundleId" },
           { status: 400 }
         );
       }
-      updates.guestPermission = body.guestPermission;
+      changes.push("guestBundleId");
     }
 
     // Don't allow ownerId changes via PATCH (use transfer endpoint)
@@ -327,7 +368,6 @@ export async function PATCH(
       .returning();
 
     // Audit log
-    const changes = Object.keys(updates);
     await logAuditEvent({
       request,
       action: "admin.calendar.update",
@@ -340,14 +380,30 @@ export async function PATCH(
         oldValues: {
           name: calendar.name,
           color: calendar.color,
-          guestPermission: calendar.guestPermission,
+          guestBundleId: calendar.guestBundleId,
         },
         newValues: updates,
         updatedBy: currentUser.email,
       },
     });
 
-    return NextResponse.json(updatedCalendar);
+    // Reuse the already-validated bundle when this request set it, instead
+    // of re-fetching the same row.
+    let guestBundle: { id: string; name: string; seedKey: string | null } | null = null;
+    if (newGuestBundle) {
+      guestBundle = {
+        id: newGuestBundle.id,
+        name: newGuestBundle.name,
+        seedKey: newGuestBundle.seedKey,
+      };
+    } else if (updatedCalendar.guestBundleId) {
+      const bundle = await getBundleForCalendar(calendarId, updatedCalendar.guestBundleId);
+      guestBundle = bundle ? { id: bundle.id, name: bundle.name, seedKey: bundle.seedKey } : null;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- dropping guestBundleId in favor of the guestBundle object below
+    const { guestBundleId: _guestBundleId, ...calendarResponse } = updatedCalendar;
+    return NextResponse.json({ ...calendarResponse, guestBundle });
   } catch (error) {
     console.error("[Admin Calendar Update API] Error:", error);
 
@@ -392,7 +448,7 @@ export async function DELETE(
     );
     if (rateLimitResponse) return rateLimitResponse;
 
-    if (!canDeleteCalendar(currentUser)) {
+    if (!siteAdminCanDeleteCalendar(currentUser)) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
         { status: 403 }

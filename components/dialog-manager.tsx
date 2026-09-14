@@ -77,7 +77,10 @@ interface DialogManagerProps {
   // Month summary dialogs opened from the day inspector
   currentDate: Date;
   shifts: ShiftWithCalendar[];
-  canEditShifts: boolean;
+  /** Per-shift own/any precision (editOwnShift/editAnyShift) — a calendar-wide boolean can't tell own from another's entry. */
+  canEditShift: (shift: ShiftWithCalendar) => boolean;
+  /** Per-shift own/any precision (deleteOwnShift/deleteAnyShift) — independent from canEditShift. */
+  canDeleteShift: (shift: ShiftWithCalendar) => boolean;
   showMonthStatsDialog: boolean;
   onMonthStatsDialogChange: (open: boolean) => void;
   showMonthShiftsDialog: boolean;
@@ -153,7 +156,8 @@ export function DialogManager(props: DialogManagerProps) {
         shifts={props.selectedDayShifts}
         onDeleteShift={props.onDeleteShiftFromDayDialog}
         onEditShift={props.onEditShiftFromDayDialog}
-        canEdit={props.canEditShifts}
+        canEditShift={props.canEditShift}
+        canDeleteShift={props.canDeleteShift}
       />
 
       {props.selectedDayDate && (
@@ -179,7 +183,8 @@ export function DialogManager(props: DialogManagerProps) {
         onOpenChange={props.onMonthShiftsDialogChange}
         currentDate={props.currentDate}
         shifts={props.shifts}
-        canEdit={props.canEditShifts}
+        canEditShift={props.canEditShift}
+        canDeleteShift={props.canDeleteShift}
         onEditShift={(shift) => props.onEditShiftFromDayDialog?.(shift)}
         onDeleteShift={props.onDeleteShift}
       />

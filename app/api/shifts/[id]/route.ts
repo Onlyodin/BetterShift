@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { calendars, shifts } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { calendars, shiftPresets, shifts } from "@/lib/db/schema";
+import { and, eq } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { canViewCalendar, canEditCalendar } from "@/lib/auth/permissions";
+import { hasCapability, hasOwnedCapability } from "@/lib/auth/permissions";
 import { parseLocalDate } from "@/lib/date-utils";
 
 // GET single shift
@@ -45,7 +45,11 @@ export async function GET(
     }
 
     // Check read permission (works for both authenticated users and guests)
-    const hasAccess = await canViewCalendar(user?.id, result[0].calendarId);
+    const hasAccess = await hasCapability(
+      user?.id,
+      result[0].calendarId,
+      "viewShifts"
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -80,7 +84,13 @@ export async function DELETE(
     }
 
     // Check write permission (works for both authenticated users and guests)
-    const hasAccess = await canEditCalendar(user?.id, shift.calendarId);
+    const hasAccess = await hasOwnedCapability(
+      user?.id,
+      shift.calendarId,
+      "deleteOwnShift",
+      "deleteAnyShift",
+      shift.createdBy
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions. Write access required." },
@@ -126,7 +136,13 @@ export async function PUT(
     }
 
     // Check write permission (works for both authenticated users and guests)
-    const hasAccess = await canEditCalendar(user?.id, existingShift.calendarId);
+    const hasAccess = await hasOwnedCapability(
+      user?.id,
+      existingShift.calendarId,
+      "editOwnShift",
+      "editAnyShift",
+      existingShift.createdBy
+    );
     if (!hasAccess) {
       return NextResponse.json(
         { error: "Insufficient permissions. Write access required." },
@@ -150,6 +166,26 @@ export async function PUT(
         return NextResponse.json(
           { error: "Invalid date format" },
           { status: 400 }
+        );
+      }
+    }
+
+    // A client-submitted presetId must belong to the shift's own calendar,
+    // otherwise a shift could get silently linked to another calendar's preset.
+    if (body.presetId && body.presetId !== existingShift.presetId) {
+      const [preset] = await db
+        .select()
+        .from(shiftPresets)
+        .where(
+          and(
+            eq(shiftPresets.id, body.presetId),
+            eq(shiftPresets.calendarId, existingShift.calendarId)
+          )
+        );
+      if (!preset) {
+        return NextResponse.json(
+          { error: "Preset not found" },
+          { status: 404 }
         );
       }
     }

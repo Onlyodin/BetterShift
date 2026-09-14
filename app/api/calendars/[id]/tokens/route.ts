@@ -3,9 +3,14 @@ import { db } from "@/lib/db";
 import { calendarAccessTokens, calendars } from "@/lib/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { checkPermission } from "@/lib/auth/permissions";
+import { getCalendarAccess, hasCapability } from "@/lib/auth/permissions";
+import {
+  assertBundleWithinCallerCapabilities,
+  handleBundleServiceError,
+  resolveGuestEligibleBundle,
+} from "@/lib/auth/permission-bundles-service";
 import { generateAccessToken } from "@/lib/auth/token-auth";
-import { logAuditEvent } from "@/lib/audit-log";
+import { logAuditEvent, type CalendarTokenCreatedMetadata } from "@/lib/audit-log";
 import { rateLimit } from "@/lib/rate-limiter";
 
 /**
@@ -21,10 +26,12 @@ export async function GET(
     const { id: calendarId } = await params;
     const user = await getSessionUser(request.headers);
 
-    // Check permissions (admin or owner only)
-    const canManage =
-      (await checkPermission(user?.id, calendarId, "admin")) ||
-      (await checkPermission(user?.id, calendarId, "owner"));
+    // Check permissions
+    const canManage = await hasCapability(
+      user?.id,
+      calendarId,
+      "manageGuestAccess"
+    );
 
     if (!canManage) {
       return NextResponse.json(
@@ -39,7 +46,7 @@ export async function GET(
         id: calendarAccessTokens.id,
         token: calendarAccessTokens.token,
         name: calendarAccessTokens.name,
-        permission: calendarAccessTokens.permission,
+        bundleId: calendarAccessTokens.bundleId,
         expiresAt: calendarAccessTokens.expiresAt,
         createdBy: calendarAccessTokens.createdBy,
         createdAt: calendarAccessTokens.createdAt,
@@ -51,9 +58,22 @@ export async function GET(
       .where(eq(calendarAccessTokens.calendarId, calendarId))
       .orderBy(desc(calendarAccessTokens.createdAt));
 
+    // Resolve each token's bundleId to its identity for the response
+    const distinctBundleIds = Array.from(
+      new Set(tokens.map((token) => token.bundleId))
+    );
+    const bundles = distinctBundleIds.length
+      ? await db.query.calendarPermissionBundles.findMany({
+          where: (b, { inArray }) => inArray(b.id, distinctBundleIds),
+          columns: { id: true, name: true, seedKey: true },
+        })
+      : [];
+    const bundleById = new Map(bundles.map((bundle) => [bundle.id, bundle]));
+
     // Return partial tokens (first 6 chars) for security
     const sanitizedTokens = tokens.map((token) => ({
       ...token,
+      bundle: bundleById.get(token.bundleId) ?? null,
       tokenPreview: `${token.token.slice(0, 6)}...`,
       token: undefined, // Remove full token from response
     }));
@@ -97,12 +117,10 @@ export async function POST(
     );
     if (rateLimitResponse) return rateLimitResponse;
 
-    // Check permissions (admin or owner only)
-    const canManage =
-      (await checkPermission(user.id, calendarId, "admin")) ||
-      (await checkPermission(user.id, calendarId, "owner"));
+    // Check permissions
+    const access = await getCalendarAccess(user.id, calendarId);
 
-    if (!canManage) {
+    if (!access?.can("manageGuestAccess")) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
         { status: 403 }
@@ -112,21 +130,29 @@ export async function POST(
     const body = await request.json();
     const {
       name,
-      permission = "read",
+      bundleId,
       expiresAt,
     }: {
       name?: string;
-      permission?: "read" | "write";
+      bundleId?: string;
       expiresAt?: string | null;
     } = body;
 
-    // Validate permission
-    if (permission !== "read" && permission !== "write") {
-      return NextResponse.json(
-        { error: "Permission must be 'read' or 'write'" },
-        { status: 400 }
-      );
+    // Validate the bundle: must exist, belong to this calendar, and be
+    // guest-eligible (E7) — a link is always a guest/link source.
+    if (!bundleId || typeof bundleId !== "string") {
+      return NextResponse.json({ error: "Invalid bundle id" }, { status: 400 });
     }
+    const bundle = await resolveGuestEligibleBundle(
+      calendarId,
+      bundleId,
+      "Bundle contains capabilities that cannot be granted via a link"
+    );
+    if (bundle instanceof NextResponse) return bundle;
+    // A non-owner manageGuestAccess holder may only assign a bundle whose
+    // capabilities are a subset of their own — closes the self-escalation
+    // path a fixed cap used to guard against pre-PR.
+    assertBundleWithinCallerCapabilities(access, bundle.capabilities);
 
     // Validate expiration date (if provided)
     let expiresAtDate: Date | null = null;
@@ -163,14 +189,14 @@ export async function POST(
         calendarId,
         token,
         name: name || null,
-        permission,
+        bundleId: bundle.id,
         expiresAt: expiresAtDate,
         createdBy: user.id,
       })
       .returning();
 
     // Audit log
-    void logAuditEvent({
+    void logAuditEvent<CalendarTokenCreatedMetadata>({
       userId: user.id,
       action: "calendar_token_created",
       resourceType: "calendar",
@@ -179,7 +205,8 @@ export async function POST(
         tokenId: newToken.id,
         tokenName: name || "Unnamed",
         calendarName: calendar?.name || "Unknown",
-        permission,
+        bundleId: bundle.id,
+        bundleName: bundle.name,
         expiresAt: expiresAt || null,
       },
       request,
@@ -191,16 +218,13 @@ export async function POST(
     return NextResponse.json(
       {
         ...newToken,
+        bundle: { id: bundle.id, name: bundle.name, seedKey: bundle.seedKey },
         token, // Full token returned ONLY on creation
         tokenPreview: `${token.slice(0, 6)}...`,
       },
       { status: 201 }
     );
   } catch (error) {
-    console.error("[API] POST /api/calendars/[id]/tokens error:", error);
-    return NextResponse.json(
-      { error: "Failed to create access token" },
-      { status: 500 }
-    );
+    return handleBundleServiceError(error, "Failed to create access token");
   }
 }

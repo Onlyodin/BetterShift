@@ -2,9 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { calendarShares, calendars } from "@/lib/db/schema";
 import { getSessionUser } from "@/lib/auth/sessions";
-import { checkPermission } from "@/lib/auth/permissions";
+import { getCalendarAccess, hasCapability } from "@/lib/auth/permissions";
+import {
+  assertBundleWithinCallerCapabilities,
+  getBundleForCalendar,
+  handleBundleServiceError,
+} from "@/lib/auth/permission-bundles-service";
 import { eq, and } from "drizzle-orm";
-import { logAuditEvent } from "@/lib/audit-log";
+import {
+  logAuditEvent,
+  type CalendarPermissionChangedMetadata,
+} from "@/lib/audit-log";
 
 export async function PUT(
   request: NextRequest,
@@ -19,8 +27,8 @@ export async function PUT(
     }
 
     // Check if user has admin/owner permission
-    const hasPermission = await checkPermission(user.id, calendarId, "admin");
-    if (!hasPermission) {
+    const access = await getCalendarAccess(user.id, calendarId);
+    if (!access?.can("manageShares")) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
         { status: 403 }
@@ -28,28 +36,20 @@ export async function PUT(
     }
 
     const body = await request.json();
-    const { permission } = body;
+    const { bundleId } = body;
 
-    // Validate permission value. "owner" is intentionally excluded — ownership
-    // transfer is not a share concept and only happens through admin routes.
-    const validPermissions = ["admin", "write", "read"];
-    if (!validPermissions.includes(permission)) {
-      return NextResponse.json(
-        { error: "Invalid permission value" },
-        { status: 400 }
-      );
+    // Validate the bundle: must exist and belong to this calendar.
+    if (!bundleId || typeof bundleId !== "string") {
+      return NextResponse.json({ error: "Invalid bundle id" }, { status: 400 });
     }
-
-    // Only owner can set/change admin permissions
-    if (permission === "admin") {
-      const isOwner = await checkPermission(user.id, calendarId, "owner");
-      if (!isOwner) {
-        return NextResponse.json(
-          { error: "Only the owner can grant admin permissions" },
-          { status: 403 }
-        );
-      }
+    const newBundle = await getBundleForCalendar(calendarId, bundleId);
+    if (!newBundle) {
+      return NextResponse.json({ error: "Bundle not found" }, { status: 404 });
     }
+    // A non-owner manageShares holder may only reassign to a bundle whose
+    // capabilities are a subset of their own — closes the self-escalation
+    // path a fixed cap used to guard against pre-PR.
+    assertBundleWithinCallerCapabilities(access, newBundle.capabilities);
 
     // Fetch existing share
     const existingShare = await db.query.calendarShares.findFirst({
@@ -64,6 +64,9 @@ export async function PUT(
             name: true,
           },
         },
+        bundle: {
+          columns: { id: true, name: true },
+        },
       },
     });
 
@@ -71,30 +74,10 @@ export async function PUT(
       return NextResponse.json({ error: "Share not found" }, { status: 404 });
     }
 
-    // Only owner can modify admin permissions, and only owner can modify a
-    // legacy "owner" share (ownership grants are no longer issued via shares).
-    // Cast for the "owner" comparison: the schema's enum type no longer
-    // includes it, but pre-existing rows in the database may still carry it.
-    if (
-      existingShare.permission === "admin" ||
-      (existingShare.permission as string) === "owner"
-    ) {
-      const isOwner = await checkPermission(user.id, calendarId, "owner");
-      if (!isOwner) {
-        return NextResponse.json(
-          { error: "Only the owner can modify admin permissions" },
-          { status: 403 }
-        );
-      }
-    }
-
-    // Store old permission for audit log
-    const oldPermission = existingShare.permission;
-
     // Update share permission
     await db
       .update(calendarShares)
-      .set({ permission })
+      .set({ bundleId: newBundle.id })
       .where(eq(calendarShares.id, shareId));
 
     // Fetch calendar name for audit log
@@ -104,20 +87,23 @@ export async function PUT(
     });
 
     // Log audit event
-    await logAuditEvent({
+    await logAuditEvent<CalendarPermissionChangedMetadata>({
       userId: user.id,
       action: "calendar.permission.changed",
+      resourceType: "calendar",
+      resourceId: calendarId,
       severity: "info",
       request,
       metadata: {
-        calendarId,
         calendarName: calendar?.name || "Unknown",
         user:
           existingShare.user.email ||
           existingShare.user.name ||
           existingShare.userId,
-        oldPermission,
-        newPermission: permission,
+        oldBundleId: existingShare.bundle.id,
+        oldBundleName: existingShare.bundle.name,
+        newBundleId: newBundle.id,
+        newBundleName: newBundle.name,
       },
     });
 
@@ -140,16 +126,15 @@ export async function PUT(
             email: true,
           },
         },
+        bundle: {
+          columns: { id: true, name: true, seedKey: true },
+        },
       },
     });
 
     return NextResponse.json(shareWithUser);
   } catch (error) {
-    console.error("Failed to update calendar share:", error);
-    return NextResponse.json(
-      { error: "Failed to update share" },
-      { status: 500 }
-    );
+    return handleBundleServiceError(error, "Failed to update share");
   }
 }
 
@@ -185,22 +170,15 @@ export async function DELETE(
       return NextResponse.json({ error: "Share not found" }, { status: 404 });
     }
 
-    // Check permissions: owner can remove any share, admin can remove non-admin shares, users can remove their own
-    const hasAdminPermission = await checkPermission(
+    // Check permissions: manageShares holder can remove any share (S1/S2 —
+    // that includes admin-capable ones, no owner-only carve-out), users can
+    // remove their own.
+    const hasAdminPermission = await hasCapability(
       user.id,
       calendarId,
-      "admin"
+      "manageShares"
     );
-    const isOwner = await checkPermission(user.id, calendarId, "owner");
     const isSelf = share.userId === user.id;
-
-    // Only owner can remove admin shares
-    if (share.permission === "admin" && !isOwner) {
-      return NextResponse.json(
-        { error: "Only the owner can remove admin shares" },
-        { status: 403 }
-      );
-    }
 
     if (!hasAdminPermission && !isSelf) {
       return NextResponse.json(

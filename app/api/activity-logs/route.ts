@@ -2,10 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { auditLogs, syncLogs } from "@/lib/db/schema";
 import { getSessionUser } from "@/lib/auth/sessions";
-import {
-  getUserAccessibleCalendars,
-  type CalendarPermission,
-} from "@/lib/auth/permissions";
+import { getUserAccessibleCalendars } from "@/lib/auth/permissions";
 import { eq, and, desc, gte, lte, inArray, sql } from "drizzle-orm";
 import { parseLocalDate } from "@/lib/date-utils";
 
@@ -266,15 +263,32 @@ export async function DELETE(request: NextRequest) {
     // history. That matches what write access already allows (editing and
     // deleting the shifts those logs describe), but it is a deliberate
     // boundary rather than a per-user delete.
-    const editablePermissions: CalendarPermission[] = [
-      "owner",
-      "admin",
-      "write",
-    ];
     const accessibleCalendars = await getUserAccessibleCalendars(user.id);
-    const calendarIds = accessibleCalendars
-      .filter((cal) => editablePermissions.includes(cal.permission))
+    const accessibleIds = new Set(accessibleCalendars.map((cal) => cal.id));
+    const ownerCalendarIds = accessibleCalendars
+      .filter((cal) => cal.isOwner)
       .map((cal) => cal.id);
+
+    // deleteSyncLogs is guest-ineligible (GUEST_INELIGIBLE in
+    // lib/permission-bundles.ts), so only owner and share sources can ever
+    // grant it — batch the share/bundle lookup instead of resolving access
+    // per calendar.
+    const shareRows = await db.query.calendarShares.findMany({
+      where: (shares, { eq: eqOp }) => eqOp(shares.userId, user.id),
+      columns: { calendarId: true },
+      with: { bundle: { columns: { capabilities: true } } },
+    });
+    const shareCalendarIds = shareRows
+      .filter(
+        (share) =>
+          accessibleIds.has(share.calendarId) &&
+          share.bundle.capabilities.includes("deleteSyncLogs")
+      )
+      .map((share) => share.calendarId);
+
+    const calendarIds = Array.from(
+      new Set([...ownerCalendarIds, ...shareCalendarIds])
+    );
 
     if (calendarIds.length > 0) {
       await db
