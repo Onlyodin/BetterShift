@@ -5,6 +5,8 @@ import { eq, asc } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
 import { hasCapability } from "@/lib/auth/permissions";
 import { trimOrNull } from "@/lib/utils";
+import { replacePresetSegments, withPresetSegments } from "@/lib/shift-time-ranges";
+import { normalizeTimeRanges, toTimeRanges, validateTimeRanges, type TimeRange } from "@/lib/time-ranges";
 
 // GET all presets for a calendar
 export async function GET(request: NextRequest) {
@@ -48,7 +50,9 @@ export async function GET(request: NextRequest) {
       .from(shiftPresets)
       .where(eq(shiftPresets.calendarId, calendarId))
       .orderBy(asc(shiftPresets.order));
-    return NextResponse.json(presets);
+    return NextResponse.json(
+      calendar.splitShiftsEnabled ? await withPresetSegments(presets) : presets
+    );
   } catch (error) {
     console.error("Error fetching presets:", error);
     return NextResponse.json(
@@ -74,6 +78,7 @@ export async function POST(request: NextRequest) {
       isAllDay,
       hideFromStats,
       defaultSignupCapacity,
+      segments: requestedSegments,
     } = body;
 
     if (!calendarId || !title) {
@@ -118,29 +123,59 @@ export async function POST(request: NextRequest) {
         ? Math.max(...existingPresets.map((p) => p.order || 0))
         : -1;
 
-    const [preset] = await db
-      .insert(shiftPresets)
-      .values({
-        calendarId,
-        title,
-        startTime: isAllDay ? "00:00" : startTime,
-        endTime: isAllDay ? "23:59" : endTime,
-        color: color || "#3b82f6",
-        notes: notes || null,
-        groupName: groupName ? trimOrNull(groupName) : null,
-        isSecondary: isSecondary || false,
-        isAllDay: isAllDay || false,
-        hideFromStats: hideFromStats || false,
-        defaultSignupCapacity:
-          typeof defaultSignupCapacity === "number"
-            ? defaultSignupCapacity
-            : null,
-        order: maxOrder + 1,
-        createdBy: user?.id ?? null,
-      })
-      .returning();
+    const rawSegments: TimeRange[] = isAllDay || !Array.isArray(requestedSegments)
+      ? []
+      : requestedSegments;
+    if (rawSegments.length > 0 && !calendar.splitShiftsEnabled) {
+      return NextResponse.json(
+        { error: "Split shifts are not enabled for this calendar" },
+        { status: 400 }
+      );
+    }
+    let effectiveStartTime = startTime;
+    let effectiveEndTime = endTime;
+    let segmentsToPersist = rawSegments;
+    if (!isAllDay) {
+      const allRanges = toTimeRanges({ startTime, endTime, segments: rawSegments });
+      const validationError = validateTimeRanges(allRanges);
+      if (validationError) {
+        return NextResponse.json({ error: validationError }, { status: 400 });
+      }
+      // Persisted primary is always the chronologically earliest range.
+      const normalized = normalizeTimeRanges(allRanges);
+      effectiveStartTime = normalized.startTime;
+      effectiveEndTime = normalized.endTime;
+      segmentsToPersist = normalized.segments;
+    }
 
-    return NextResponse.json(preset);
+    const preset = db.transaction((tx) => {
+      const inserted = tx
+        .insert(shiftPresets)
+        .values({
+          calendarId,
+          title,
+          startTime: isAllDay ? "00:00" : effectiveStartTime,
+          endTime: isAllDay ? "23:59" : effectiveEndTime,
+          color: color || "#3b82f6",
+          notes: notes || null,
+          groupName: groupName ? trimOrNull(groupName) : null,
+          isSecondary: isSecondary || false,
+          isAllDay: isAllDay || false,
+          hideFromStats: hideFromStats || false,
+          defaultSignupCapacity:
+            typeof defaultSignupCapacity === "number"
+              ? defaultSignupCapacity
+              : null,
+          order: maxOrder + 1,
+          createdBy: user?.id ?? null,
+        })
+        .returning()
+        .get();
+      replacePresetSegments(tx, inserted.id, segmentsToPersist);
+      return inserted;
+    });
+
+    return NextResponse.json({ ...preset, segments: segmentsToPersist });
   } catch (error) {
     console.error("Error creating preset:", error);
     return NextResponse.json(

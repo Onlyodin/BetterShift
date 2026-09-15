@@ -7,6 +7,8 @@ import { hasCapability, getCalendarAccess } from "@/lib/auth/permissions";
 import { addShiftSignup, withSignups } from "@/lib/shift-signups";
 import { parseLocalDate } from "@/lib/date-utils";
 import type { CalendarMember } from "@/lib/types";
+import { withShiftSegments, replaceShiftSegments, withPresetSegments } from "@/lib/shift-time-ranges";
+import { normalizeTimeRanges, toTimeRanges, validateTimeRanges, type TimeRange } from "@/lib/time-ranges";
 
 // GET shifts for a calendar (with optional date filter)
 export async function GET(request: Request) {
@@ -98,7 +100,10 @@ export async function GET(request: Request) {
           or(isNull(shifts.externalSyncId), eq(externalSyncs.isHidden, false))
         )
       );
-      return NextResponse.json(await withSignups(result));
+      const withSigs = await withSignups(result);
+      return NextResponse.json(
+        calendar.splitShiftsEnabled ? await withShiftSegments(withSigs) : withSigs
+      );
     }
 
     const result = await query.where(
@@ -108,7 +113,10 @@ export async function GET(request: Request) {
         or(isNull(shifts.externalSyncId), eq(externalSyncs.isHidden, false))
       )
     );
-    return NextResponse.json(await withSignups(result));
+    const withSigs = await withSignups(result);
+    return NextResponse.json(
+      calendar.splitShiftsEnabled ? await withShiftSegments(withSigs) : withSigs
+    );
   } catch (error) {
     console.error("Failed to fetch shifts:", error);
     return NextResponse.json(
@@ -135,6 +143,7 @@ export async function POST(request: Request) {
       isSecondary,
       signupCapacity,
       signupUserIds,
+      segments: requestedSegments,
     } = body;
 
     if (!calendarId || !date || !title) {
@@ -194,6 +203,7 @@ export async function POST(request: Request) {
       notes: string | null;
       isAllDay: boolean;
     };
+    let segmentsToPersist: TimeRange[] = [];
     if (access.can("createShift")) {
       if (presetId) {
         const [preset] = await db
@@ -220,6 +230,28 @@ export async function POST(request: Request) {
         notes: notes || null,
         isAllDay: isAllDay || false,
       };
+
+      if (!isAllDay) {
+        const rawSegments: TimeRange[] = Array.isArray(requestedSegments)
+          ? requestedSegments
+          : [];
+        if (rawSegments.length > 0 && !calendar.splitShiftsEnabled) {
+          return NextResponse.json(
+            { error: "Split shifts are not enabled for this calendar" },
+            { status: 400 }
+          );
+        }
+        const allRanges = toTimeRanges({ ...insertValues, segments: rawSegments });
+        const validationError = validateTimeRanges(allRanges);
+        if (validationError) {
+          return NextResponse.json({ error: validationError }, { status: 400 });
+        }
+        // Persisted primary is always the chronologically earliest range.
+        const normalized = normalizeTimeRanges(allRanges);
+        insertValues.startTime = normalized.startTime;
+        insertValues.endTime = normalized.endTime;
+        segmentsToPersist = normalized.segments;
+      }
     } else {
       if (!presetId) {
         return NextResponse.json(
@@ -250,23 +282,32 @@ export async function POST(request: Request) {
         notes: preset.notes,
         isAllDay: preset.isAllDay,
       };
+      if (!preset.isAllDay && calendar.splitShiftsEnabled) {
+        const [presetWithSegments] = await withPresetSegments([preset]);
+        segmentsToPersist = presetWithSegments.segments;
+      }
     }
 
-    const [shift] = await db
-      .insert(shifts)
-      .values({
-        calendarId,
-        presetId: presetId || null,
-        date: parsedDate,
-        ...insertValues,
-        isSecondary: isSecondary || false,
-        signupCapacity:
-          typeof signupCapacity === "number" ? signupCapacity : null,
-        createdBy: user?.id ?? null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .returning();
+    const shift = db.transaction((tx) => {
+      const inserted = tx
+        .insert(shifts)
+        .values({
+          calendarId,
+          presetId: presetId || null,
+          date: parsedDate,
+          ...insertValues,
+          isSecondary: isSecondary || false,
+          signupCapacity:
+            typeof signupCapacity === "number" ? signupCapacity : null,
+          createdBy: user?.id ?? null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .returning()
+        .get();
+      replaceShiftSegments(tx, inserted.id, segmentsToPersist);
+      return inserted;
+    });
 
     // Best-effort: a shift the caller picked people for still gets created
     // even if one of those signups is no longer valid by the time we get here.
@@ -291,7 +332,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(
-      { ...shift, calendar, signups },
+      { ...shift, calendar, signups, segments: segmentsToPersist },
       { status: 201 }
     );
   } catch (error) {

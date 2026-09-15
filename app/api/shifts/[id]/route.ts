@@ -5,6 +5,8 @@ import { and, eq } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/sessions";
 import { hasCapability, hasOwnedCapability } from "@/lib/auth/permissions";
 import { parseLocalDate } from "@/lib/date-utils";
+import { replaceShiftSegments, withShiftSegments } from "@/lib/shift-time-ranges";
+import { normalizeTimeRanges, toTimeRanges, validateTimeRanges, type TimeRange } from "@/lib/time-ranges";
 
 // GET single shift
 export async function GET(
@@ -34,6 +36,7 @@ export async function GET(
           id: calendars.id,
           name: calendars.name,
           color: calendars.color,
+          splitShiftsEnabled: calendars.splitShiftsEnabled,
         },
       })
       .from(shifts)
@@ -57,7 +60,11 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(result[0]);
+    if (!result[0].calendar?.splitShiftsEnabled) {
+      return NextResponse.json(result[0]);
+    }
+    const [withSegments] = await withShiftSegments([result[0]]);
+    return NextResponse.json(withSegments);
   } catch (error) {
     console.error("Failed to fetch shift:", error);
     return NextResponse.json(
@@ -190,30 +197,80 @@ export async function PUT(
       }
     }
 
-    // Update the shift
-    const [updatedShift] = await db
-      .update(shifts)
-      .set({
-        date,
-        startTime: body.startTime ?? existingShift.startTime,
-        endTime: body.endTime ?? existingShift.endTime,
-        title: body.title ?? existingShift.title,
-        color: body.color ?? existingShift.color,
-        notes: body.notes ?? existingShift.notes,
-        isAllDay: body.isAllDay ?? existingShift.isAllDay,
-        presetId: body.presetId ?? existingShift.presetId,
-        signupCapacity:
-          typeof body.signupCapacity === "number"
-            ? body.signupCapacity
-            : body.signupCapacity === null
-              ? null
-              : existingShift.signupCapacity,
-        updatedAt: new Date(),
-      })
-      .where(eq(shifts.id, id))
-      .returning();
+    let nextStartTime = body.startTime ?? existingShift.startTime;
+    let nextEndTime = body.endTime ?? existingShift.endTime;
+    const nextIsAllDay = body.isAllDay ?? existingShift.isAllDay;
 
-    return NextResponse.json(updatedShift);
+    // Segments are only ever written when the calendar has split shifts enabled — otherwise
+    // a client that can no longer see stored segments (GET omits them while the flag is off)
+    // would round-trip `segments: []` on any unrelated edit and wipe the real stored rows.
+    let nextSegments: TimeRange[] | undefined;
+    if (body.segments !== undefined) {
+      const rawSegments: TimeRange[] = Array.isArray(body.segments) ? body.segments : [];
+      const [calendar] = await db
+        .select()
+        .from(calendars)
+        .where(eq(calendars.id, existingShift.calendarId));
+      if (!nextIsAllDay) {
+        if (rawSegments.length > 0 && !calendar?.splitShiftsEnabled) {
+          return NextResponse.json(
+            { error: "Split shifts are not enabled for this calendar" },
+            { status: 400 }
+          );
+        }
+        const allRanges = toTimeRanges({
+          startTime: nextStartTime,
+          endTime: nextEndTime,
+          segments: rawSegments,
+        });
+        const validationError = validateTimeRanges(allRanges);
+        if (validationError) {
+          return NextResponse.json({ error: validationError }, { status: 400 });
+        }
+        if (calendar?.splitShiftsEnabled) {
+          // Persisted primary is always the chronologically earliest range.
+          const normalized = normalizeTimeRanges(allRanges);
+          nextStartTime = normalized.startTime;
+          nextEndTime = normalized.endTime;
+          nextSegments = normalized.segments;
+        }
+      } else if (calendar?.splitShiftsEnabled) {
+        nextSegments = [];
+      }
+    }
+
+    // Update the shift
+    const updatedShift = db.transaction((tx) => {
+      const updated = tx
+        .update(shifts)
+        .set({
+          date,
+          startTime: nextStartTime,
+          endTime: nextEndTime,
+          title: body.title ?? existingShift.title,
+          color: body.color ?? existingShift.color,
+          notes: body.notes ?? existingShift.notes,
+          isAllDay: nextIsAllDay,
+          presetId: body.presetId ?? existingShift.presetId,
+          signupCapacity:
+            typeof body.signupCapacity === "number"
+              ? body.signupCapacity
+              : body.signupCapacity === null
+                ? null
+                : existingShift.signupCapacity,
+          updatedAt: new Date(),
+        })
+        .where(eq(shifts.id, id))
+        .returning()
+        .get();
+      if (nextSegments !== undefined) {
+        replaceShiftSegments(tx, id, nextSegments);
+      }
+      return updated;
+    });
+
+    const [withSegments] = await withShiftSegments([updatedShift]);
+    return NextResponse.json(withSegments);
   } catch (error) {
     console.error("Failed to update shift:", error);
     return NextResponse.json(
