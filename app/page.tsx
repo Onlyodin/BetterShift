@@ -169,6 +169,18 @@ function HomeContent() {
   const viewSettings = useViewSettings();
   const dialogStates = useDialogStates();
 
+  // Symmetric to CalendarWorkspace's mobile stats-sheet guard: close the
+  // desktop stats dialog immediately if the capability disappears mid-session,
+  // rather than leaving it open against a now-forbidden endpoint.
+  const canViewStats = can("viewStats");
+  const [prevCanViewStats, setPrevCanViewStats] = useState(canViewStats);
+  if (canViewStats !== prevCanViewStats) {
+    setPrevCanViewStats(canViewStats);
+    if (!canViewStats && dialogStates.showMonthStatsDialog) {
+      dialogStates.setShowMonthStatsDialog(false);
+    }
+  }
+
   const noteActions = useNoteActions({
     createNote: createNoteHook,
     updateNote: updateNoteHook,
@@ -290,12 +302,16 @@ function HomeContent() {
     calendars.find((c) => c.id === selectedCalendar)
   );
 
+  // Mirrors the server's OR check in app/api/shifts/route.ts — stamping only
+  // needs one of the two capabilities, not specifically createShift.
+  const canStampPreset = can("stampPreset") || can("createShift");
+
   // The armed presets are page state that outlives the stamp bar: it survives a
   // calendar switch, going offline and the personal toggle, none of which render
   // the dock. Derived here so a day click can never stamp without it on screen.
   const presetIdSet = new Set(presets.map((p) => p.id));
   const armedPresetIds =
-    can("createShift") && isOnline && calendarView.showStampBar
+    canStampPreset && isOnline && calendarView.showStampBar
       ? selectedPresetIds.filter((id) => presetIdSet.has(id))
       : [];
 
@@ -491,6 +507,8 @@ function HomeContent() {
         canEditShift={canEditShift}
         canDeleteShift={canDeleteShift}
         showStampBar={calendarView.showStampBar}
+        canStampPreset={canStampPreset}
+        canViewStats={canViewStats}
         selectedPresetIds={armedPresetIds}
         onSelectPreset={handlePresetSelection}
         onManagePresets={() => dialogStates.setShowPresetManageDialog(true)}

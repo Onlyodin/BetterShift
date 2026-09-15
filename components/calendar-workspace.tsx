@@ -42,7 +42,7 @@ interface CalendarWorkspaceProps {
   showShiftNotes: boolean;
   highlightedWeekdays: number[];
   highlightColor: string;
-  /** createShift — gates stamping and the "add a new shift" affordances */
+  /** createShift — gates the manual "add a new shift" affordance only */
   canCreateShift: boolean;
   /** manageOwnNotesEvents — creating a note/event only ever needs "own" */
   canAddNote: boolean;
@@ -51,6 +51,10 @@ interface CalendarWorkspaceProps {
   /** Per-shift own/any precision (deleteOwnShift/deleteAnyShift) for the delete affordance */
   canDeleteShift: (shift: ShiftWithCalendar) => boolean;
   showStampBar: boolean;
+  /** stampPreset OR createShift — mirrors the server's OR check for stamping a preset */
+  canStampPreset: boolean;
+  /** viewStats — hides the stats trigger entirely when absent, instead of failing on click */
+  canViewStats: boolean;
   selectedPresetIds: string[];
   onSelectPreset: (id: string | undefined, multiSelect?: boolean) => void;
   onManagePresets: () => void;
@@ -82,6 +86,8 @@ export function CalendarWorkspace({
   canEditShift,
   canDeleteShift,
   showStampBar,
+  canStampPreset,
+  canViewStats,
   selectedPresetIds,
   onSelectPreset,
   onManagePresets,
@@ -98,22 +104,32 @@ export function CalendarWorkspace({
   const [period, setPeriod] = useState<StatsPeriod>("month");
   const [statsOpen, setStatsOpen] = useState(false);
 
+  // MobileStatsSheet is skip-mounted below when !canViewStats, so a lingering
+  // `true` here would pop it open unbidden if the capability comes back later.
+  // Adjusted during render (not an effect) per React's "adjusting state when a
+  // prop changes" pattern, to avoid an extra commit.
+  const [prevCanViewStats, setPrevCanViewStats] = useState(canViewStats);
+  if (canViewStats !== prevCanViewStats) {
+    setPrevCanViewStats(canViewStats);
+    if (!canViewStats) setStatsOpen(false);
+  }
+
   const dayData = useDayData({ selectedDay, shifts, notes });
   const monthSummary = usePeriodSummary({
-    calendarId,
+    calendarId: canViewStats ? calendarId : undefined,
     anchorDate: currentDate,
     period: "month",
     shifts,
   });
   // Anchored on the week, not the day, so tapping around inside a week reuses one cache entry
   const sheetSummary = usePeriodSummary({
-    calendarId: statsOpen ? calendarId : undefined,
+    calendarId: statsOpen && canViewStats ? calendarId : undefined,
     anchorDate: period === "week" ? startOfWeek(selectedDay, { weekStartsOn: 1 }) : currentDate,
     period,
     shifts,
   });
 
-  const stampingEnabled = canCreateShift && isOnline && showStampBar;
+  const stampingEnabled = canStampPreset && isOnline && showStampBar;
   const stampPresetIds = useMemo(
     () => orderStampPresets(presets).map((p) => p.id),
     [presets]
@@ -194,7 +210,7 @@ export function CalendarWorkspace({
               />
             )}
           </main>
-          <DayInspector model={model} actions={actions} />
+          <DayInspector model={model} actions={actions} canViewStats={canViewStats} />
         </div>
       </div>
     );
@@ -238,11 +254,14 @@ export function CalendarWorkspace({
         )}
         <MobileDayFooter
           summary={monthSummary}
+          currentDate={currentDate}
+          canViewStats={canViewStats}
           onOpenStats={() => {
             // The footer shows the month, so the sheet opens on it
             setPeriod("month");
             setStatsOpen(true);
           }}
+          onOpenMonthShifts={actions.onOpenMonthShifts}
           onAddShift={model.canAddShift ? actions.onAddShift : undefined}
         />
       </div>
@@ -252,15 +271,17 @@ export function CalendarWorkspace({
         open={sheetOpen}
         onOpenChange={onSheetOpenChange}
       />
-      <MobileStatsSheet
-        model={model}
-        actions={actions}
-        period={period}
-        onPeriodChange={setPeriod}
-        summary={sheetSummary}
-        open={statsOpen}
-        onOpenChange={setStatsOpen}
-      />
+      {canViewStats && (
+        <MobileStatsSheet
+          model={model}
+          actions={actions}
+          period={period}
+          onPeriodChange={setPeriod}
+          summary={sheetSummary}
+          open={statsOpen}
+          onOpenChange={setStatsOpen}
+        />
+      )}
     </div>
   );
 }

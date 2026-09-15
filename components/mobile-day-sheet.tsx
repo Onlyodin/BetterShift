@@ -26,52 +26,79 @@ const LOW_MAX = 0.6;
 // vaul's own snap transition, so the inner height moves with the sheet
 const SNAP_EASE = "duration-500 ease-[cubic-bezier(0.32,0.72,0,1)]";
 
-/** Bottom bar under the phone grid: the visible month in figures and a button to add a shift. */
+/** Bottom bar under the phone grid: the visible month in figures — or, without viewStats, a link to the month's shifts — and a button to add a shift. */
 export function MobileDayFooter({
   summary,
+  currentDate,
   onOpenStats,
+  onOpenMonthShifts,
   onAddShift,
+  canViewStats,
 }: {
   summary: PeriodSummary;
+  /** Only needed for the "all shifts in <month>" fallback label when stats are hidden */
+  currentDate: Date;
   onOpenStats: () => void;
+  onOpenMonthShifts: () => void;
   /** Hidden when the calendar can't be edited */
   onAddShift?: () => void;
+  canViewStats: boolean;
 }) {
   const t = useTranslations();
   const locale = useLocale();
   const { stats, freeDays } = summary;
-  const figures = [
-    { label: t("calendarView.kpiShifts"), value: stats?.totalShifts ?? "–" },
-    {
-      label: t("calendarView.kpiHours"),
-      value: stats
-        ? new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(stats.totalMinutes / 60)
-        : "–",
-    },
-    { label: t("calendarView.kpiFreeDays"), value: freeDays ?? "–" },
-  ];
+  const figures = canViewStats
+    ? [
+        { label: t("calendarView.kpiShifts"), value: stats?.totalShifts ?? "–" },
+        {
+          label: t("calendarView.kpiHours"),
+          value: stats
+            ? new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(
+                stats.totalMinutes / 60
+              )
+            : "–",
+        },
+        { label: t("calendarView.kpiFreeDays"), value: freeDays ?? "–" },
+      ]
+    : [];
 
   return (
     <div className="flex items-center gap-2.5 border-t border-line bg-surface-panel px-3.5 pb-[max(9px,env(safe-area-inset-bottom))] pt-[9px]">
-      <button
-        type="button"
-        onClick={onOpenStats}
-        className="flex min-w-0 flex-1 items-center gap-2 py-0.5 text-left"
-      >
-        <span className="grid min-w-0 flex-1 grid-cols-3 gap-2">
-          {figures.map((figure) => (
-            <span key={figure.label} className="min-w-0">
-              <span className="block truncate font-mono text-[15px] font-medium leading-5 text-fg-strong">
-                {figure.value}
+      {canViewStats ? (
+        <button
+          type="button"
+          onClick={onOpenStats}
+          className="flex min-w-0 flex-1 items-center gap-2 py-0.5 text-left"
+        >
+          <span className="grid min-w-0 flex-1 grid-cols-3 gap-2">
+            {figures.map((figure) => (
+              <span key={figure.label} className="min-w-0">
+                <span className="block truncate font-mono text-[15px] font-medium leading-5 text-fg-strong">
+                  {figure.value}
+                </span>
+                <span className="block truncate text-[10.5px] leading-[14px] text-fg-tertiary">
+                  {figure.label}
+                </span>
               </span>
-              <span className="block truncate text-[10.5px] leading-[14px] text-fg-tertiary">
-                {figure.label}
-              </span>
-            </span>
-          ))}
-        </span>
-        <ChevronUp className="size-4 shrink-0 text-fg-tertiary" />
-      </button>
+            ))}
+          </span>
+          <ChevronUp className="size-4 shrink-0 text-fg-tertiary" />
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={onOpenMonthShifts}
+          className="flex min-w-0 flex-1 items-center gap-2.5 py-0.5 text-left"
+        >
+          <List className="size-4 shrink-0 text-fg-tertiary" />
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-fg-secondary">
+            {t("calendarView.allShiftsIn", {
+              month: format(currentDate, "LLLL", { locale: getDateLocale(locale) }),
+            })}
+          </span>
+          <ChevronRight className="size-4 shrink-0 text-fg-tertiary" />
+        </button>
+      )}
       {onAddShift && (
         <button
           type="button"
