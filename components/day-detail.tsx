@@ -9,7 +9,6 @@ import {
   RefreshCw,
   StickyNote,
   Trash2,
-  UserPlus,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -30,8 +29,8 @@ import {
 import { PeriodSummary } from "@/hooks/useDaySummary";
 import { cn, getUserInitials } from "@/lib/utils";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { useAuth } from "@/hooks/useAuth";
-import { useQuickSelfSignup, useShiftSignupPermission } from "@/hooks/useShiftSignups";
+import { useShiftSignupPermission } from "@/hooks/useShiftSignups";
+import { QuickSignupButton } from "@/components/day-cell-entries";
 
 /** Compact avatar stack for who signed up; renders nothing when unused. */
 function ShiftSignupBadge({
@@ -109,7 +108,11 @@ interface ShiftDetailRowProps {
   canEdit: boolean;
   canDelete: boolean;
   actions: "menu" | "inline";
+  /** List view: title and note wrap instead of truncating */
+  fullTitle?: boolean;
   onEdit: (shift: ShiftWithCalendar) => void;
+  /** What a click on the row itself does; defaults to `onEdit`, which the menu always keeps */
+  onOpen?: (shift: ShiftWithCalendar) => void;
   onDelete: (shift: ShiftWithCalendar) => void;
 }
 
@@ -118,7 +121,9 @@ export function ShiftDetailRow({
   canEdit,
   canDelete,
   actions,
+  fullTitle = false,
   onEdit,
+  onOpen,
   onDelete,
 }: ShiftDetailRowProps) {
   const t = useTranslations();
@@ -130,18 +135,11 @@ export function ShiftDetailRow({
   const deletable = canDelete && !synced;
   const minutes = getShiftMinutes(shift);
 
-  const { user: currentUser } = useAuth();
-  const { canManageOwn, signupsEnabled } = useShiftSignupPermission(shift.calendarId);
-  const { signUpForShift, isPending: signingUp } = useQuickSelfSignup();
-  const signups = shift.signups ?? [];
-  const capacity = shift.signupCapacity ?? null;
-  const alreadySignedUp = !!currentUser && signups.some((s) => s.id === currentUser.id);
-  const isFull = capacity != null && signups.length >= capacity;
-  const showQuickSignup = canManageOwn && !alreadySignedUp && !isFull;
+  const { signupsEnabled } = useShiftSignupPermission(shift.calendarId);
 
   return (
     <div
-      onClick={() => onEdit(shift)}
+      onClick={() => (onOpen ?? onEdit)(shift)}
       className="flex cursor-pointer items-center gap-[11px] rounded-lg border border-line bg-surface-card px-3 py-[11px] transition-colors hover:bg-surface-panel"
     >
       <span
@@ -149,32 +147,20 @@ export function ShiftDetailRow({
         style={shiftVars(shift.color)}
       />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[13.5px] font-semibold text-fg-strong">
+        <div className={cn("text-[13.5px] font-semibold text-fg-strong", fullTitle ? "break-words" : "truncate")}>
           {shift.title}
         </div>
         <div className="mt-0.5 font-mono text-xs text-fg-tertiary">
           {shift.isAllDay ? t("shift.allDayShift") : formatTimeRange(shift)}
         </div>
         {shift.notes && (
-          <div className="mt-1 line-clamp-2 text-xs text-fg-secondary">{shift.notes}</div>
+          <div className={cn("mt-1 text-xs text-fg-secondary", fullTitle ? "whitespace-pre-line break-words" : "line-clamp-2")}>
+            {shift.notes}
+          </div>
         )}
       </div>
       <ShiftSignupBadge shift={shift} signupsEnabled={signupsEnabled} />
-      {showQuickSignup && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            signUpForShift(shift.id);
-          }}
-          disabled={signingUp}
-          aria-label={t("shiftSignup.addSelf")}
-          title={t("shiftSignup.addSelf")}
-          className="flex size-7 shrink-0 items-center justify-center rounded-md text-fg-tertiary transition-colors hover:bg-surface-sunken disabled:opacity-40"
-        >
-          <UserPlus className="size-4" />
-        </button>
-      )}
+      <QuickSignupButton shift={shift} />
       {synced && (
         <span
           className="flex items-center gap-1 rounded-full bg-surface-sunken px-2 py-0.5 text-[11px] font-semibold text-fg-secondary"
@@ -199,7 +185,12 @@ export function ShiftDetailRow({
             >
               <Ellipsis className="size-4" />
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent
+              align="end"
+              // Portal content bubbles into the row below; keep menu clicks/holds from stamping it
+              onClick={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+            >
               {editable && (
                 <DropdownMenuItem
                   onClick={(e) => {
