@@ -6,6 +6,7 @@ import {
   Bell,
   Download,
   Layers,
+  ListChecks,
   Palette,
   RefreshCw,
   SlidersHorizontal,
@@ -21,6 +22,7 @@ import { ColorSwatches, DangerZone, Field, inputClass } from "@/components/form-
 import { ExportPanel } from "@/components/export-dialog";
 import { CalendarViewPanel, ViewSettingsState } from "@/components/view-settings-sheet";
 import { PresetsPanel } from "@/components/preset-manage-sheet";
+import { CustomFieldsPanel } from "@/components/custom-fields-panel";
 import { ExternalSyncPanel } from "@/components/external-sync-manage-sheet";
 import { SyncNotificationsPanel } from "@/components/sync-notification-dialog";
 import { PermissionsPanel } from "@/components/calendar-permissions-panel";
@@ -42,7 +44,8 @@ export type SettingsSection =
   | "permissions"
   | "export"
   | "view"
-  | "notifications";
+  | "notifications"
+  | "customFields";
 
 export interface SettingsItem {
   id: SettingsSection;
@@ -216,6 +219,13 @@ export function useCalendarSettings(calendarId: string | null) {
       description: t("settings.externalHint", { count: externalSyncs.length }),
       meta: externalSyncs.length,
     });
+  if (permission.can("manageCustomFields"))
+    items.push({
+      id: "customFields",
+      icon: ListChecks,
+      title: t("customFields.title"),
+      description: t("customFields.description"),
+    });
   // S2: the panel is worth opening with either capability — it self-gates each
   // section (manageShares for people, manageGuestAccess for guest/links).
   if (isAuthEnabled && canOpenPermissions)
@@ -318,6 +328,8 @@ export function CalendarSettingsPanel({
       );
     case "notifications":
       return <SyncNotificationsPanel calendarId={calendarId} onClose={onClose} />;
+    case "customFields":
+      return <CustomFieldsPanel calendarId={calendarId} onDirtyChange={onDirtyChange} />;
   }
 }
 

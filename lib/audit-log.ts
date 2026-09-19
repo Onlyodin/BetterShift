@@ -193,6 +193,30 @@ export interface CalendarBundleDeletedMetadata {
   bundleName: string;
 }
 
+export interface CustomFieldCreatedMetadata {
+  calendarId: string;
+  calendarName: string;
+  fieldKey: string;
+  fieldLabel: string;
+  fieldType: string;
+}
+
+export interface CustomFieldUpdatedMetadata {
+  calendarId: string;
+  calendarName: string;
+  fieldKey: string;
+  fieldLabel: string;
+}
+
+export interface CustomFieldDeletedMetadata {
+  calendarId: string;
+  calendarName: string;
+  fieldKey: string;
+  fieldLabel: string;
+  affectedShifts: number;
+  affectedPresets: number;
+}
+
 // Union type for all metadata
 export type AuditLogMetadata =
   | LoginFailedMetadata
@@ -220,7 +244,10 @@ export type AuditLogMetadata =
   | CalendarBundleCreatedMetadata
   | CalendarBundleUpdatedMetadata
   | CalendarBundleClonedMetadata
-  | CalendarBundleDeletedMetadata;
+  | CalendarBundleDeletedMetadata
+  | CustomFieldCreatedMetadata
+  | CustomFieldUpdatedMetadata
+  | CustomFieldDeletedMetadata;
 
 // =====================================================
 // Audit Log Types

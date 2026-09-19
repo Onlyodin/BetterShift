@@ -1185,7 +1185,8 @@
       "deleteSyncLogs": "Supprimer les journaux de synchronisation",
       "manageShares": "Gérer les partages",
       "manageGuestAccess": "Gérer l'accès invité et les liens",
-      "manageCalendarSettings": "Gérer les paramètres du calendrier"
+      "manageCalendarSettings": "Gérer les paramètres du calendrier",
+      "manageCustomFields": "Gérer les champs personnalisés"
     },
     "capabilityHints": {
       "viewShifts": "Voir le calendrier et ses créneaux",
@@ -1208,7 +1209,37 @@
       "deleteSyncLogs": "Supprimer les entrées du journal de synchronisation externe",
       "manageShares": "Décider qui a accès au calendrier",
       "manageGuestAccess": "Contrôler l'accès public et les liens d'accès",
-      "manageCalendarSettings": "Modifier le nom, la couleur et d'autres paramètres"
+      "manageCalendarSettings": "Modifier le nom, la couleur et d'autres paramètres",
+      "manageCustomFields": "Créer et modifier des champs supplémentaires pour les services et les préréglages"
     }
+  },
+  "customFields": {
+    "title": "Champs personnalisés",
+    "description": "Champs supplémentaires pour les créneaux et modèles de ce calendrier",
+    "empty": "Aucun champ personnalisé pour l'instant",
+    "addButton": "Ajouter un champ",
+    "labelLabel": "Libellé",
+    "keyLabel": "Clé",
+    "keyHint": "Utilisée dans l'API et ne peut plus être modifiée par la suite",
+    "keyInUse": "Cette clé est déjà utilisée",
+    "typeLabel": "Type",
+    "typeImmutableHint": "Le type ne peut plus être modifié une fois le champ créé",
+    "typeText": "Texte",
+    "typeNumber": "Nombre",
+    "typeDate": "Date",
+    "typeCheckbox": "Oui/Non",
+    "typeSelect": "Choix",
+    "selectNone": "Aucune sélection",
+    "optionsLabel": "Options",
+    "optionsHint": "Indiquez au moins une option",
+    "addOption": "Ajouter une option",
+    "requiredLabel": "Champ obligatoire",
+    "requiredHint": "Doit être rempli lors de l'enregistrement d'un créneau",
+    "showInCalendarLabel": "Afficher dans la vue du calendrier",
+    "showInCalendarHint": "Apparaît dans la colonne du jour et de façon compacte dans les cellules du mois et de la semaine",
+    "presetDefaultsTitle": "Valeurs par défaut",
+    "deleteConfirm": "Ce champ va être supprimé. Les valeurs de {shifts} créneaux et {presets} modèles seront perdues.",
+    "saveFailed": "Impossible d'enregistrer le champ",
+    "deleteFailed": "Impossible de supprimer le champ"
   }
 }
