@@ -157,9 +157,33 @@ export interface AdminPasswordResetMetadata {
   targetUser: string;
 }
 
+// Mirrors SystemSettings minus telemetryInstanceId: the instance id must never
+// reach an audit log, which admins can export.
+interface AuditedSystemSettings {
+  updateCheckEnabled: boolean;
+  updateBannerVisibility: string;
+  allowGuestAccess: boolean;
+  telemetryEnabled: boolean | null;
+  telemetryConsentedSchema: number | null;
+  telemetryDecidedAt: Date | null;
+}
+
 export interface AdminSystemSettingsUpdatedMetadata {
-  before: { updateCheckEnabled: boolean; updateBannerVisibility: string; allowGuestAccess: boolean };
-  after: { updateCheckEnabled: boolean; updateBannerVisibility: string; allowGuestAccess: boolean };
+  before: AuditedSystemSettings;
+  after: AuditedSystemSettings;
+}
+
+export interface AdminTelemetryConsentMetadata {
+  before: boolean | null;
+  after: boolean;
+  schemaVersion: number;
+}
+
+// Outcome only: the endpoint URL can be private and must not reach an exportable log.
+// Shared by the admin button and the daily timer.
+export interface TelemetrySendMetadata {
+  result: "sent" | "failed";
+  reason?: "timeout" | "network" | "http";
 }
 
 export interface AdminUserCreateMetadata {
@@ -241,6 +265,8 @@ export type AuditLogMetadata =
   | AdminCalendarTransferMetadata
   | AdminPasswordResetMetadata
   | AdminSystemSettingsUpdatedMetadata
+  | AdminTelemetryConsentMetadata
+  | TelemetrySendMetadata
   | CalendarBundleCreatedMetadata
   | CalendarBundleUpdatedMetadata
   | CalendarBundleClonedMetadata

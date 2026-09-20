@@ -527,9 +527,13 @@
       "visibility": "Banner visible para",
       "visibilityAll": "Todos",
       "visibilityAdmins": "Solo administradores",
-      "updateError": "No se pudieron guardar los ajustes",
-      "guestAccess": "Acceso de invitado",
-      "guestAccessHint": "Permite ver calendarios sin iniciar sesión, si el calendario lo permite."
+      "updateError": "No se pudieron guardar los ajustes"
+    },
+    "guestAccess": {
+      "title": "Acceso de invitado",
+      "description": "Controla si los calendarios se pueden ver sin iniciar sesión.",
+      "toggleLabel": "Permitir acceso de invitado",
+      "toggleHint": "Permite ver calendarios sin iniciar sesión, si el calendario lo permite."
     },
     "orphanedCalendarsWarning": "Se han detectado calendarios huérfanos",
     "orphanedCalendarsWarningDescription": "{count, plural, =1 {Hay 1 calendario sin propietario} other {Hay # calendarios sin propietario}}. Por favor, asígnalos a usuarios.",
@@ -662,7 +666,28 @@
     "createUser": "Crear usuario",
     "createUserSubtitle": "Crea una nueva cuenta, incluso con el registro desactivado.",
     "mustChangePasswordHint": "El usuario deberá cambiar esta contraseña en el primer inicio de sesión.",
-    "emailAlreadyExists": "Ya existe un usuario con esta dirección de correo electrónico"
+    "emailAlreadyExists": "Ya existe un usuario con esta dirección de correo electrónico",
+    "telemetry": {
+      "title": "Telemetría y diagnóstico",
+      "description": "Enviar datos de uso anónimos al proyecto.",
+      "toggleLabel": "Enviar telemetría",
+      "notDecided": "Aún sin decidir",
+      "envManaged": "Definido por la variable de entorno TELEMETRY_ENABLED",
+      "previewTitle": "Vista previa de los datos a enviar",
+      "diagnosticsPreviewTitle": "Datos exportados",
+      "diagnosticsTitle": "Datos de diagnóstico para informes de error",
+      "diagnosticsDescription": "Incluye cifras exactas y los interruptores de configuración activados. Pensado solo para informes de error.",
+      "includeInstanceId": "Incluir identificador de instancia",
+      "includeInstanceIdHint": "Vincula el informe de error con los datos de telemetría de esta instancia.",
+      "copy": "Copiar como Markdown",
+      "copied": "Copiado al portapapeles",
+      "openIssue": "Abrir informe de error en GitHub",
+      "sendNow": "Enviar ahora",
+      "sendNowHint": "Solo disponible mientras la telemetría esté activada.",
+      "sendSuccess": "Telemetría enviada",
+      "sendFailed": "Error al enviar. El servidor de telemetría no está accesible o rechazó la solicitud.",
+      "sendUnavailable": "No se puede enviar: la telemetría está desactivada, el consentimiento está desactualizado o es una compilación de desarrollo."
+    }
   },
   "appearance": {
     "title": "Apariencia",
@@ -1060,7 +1085,13 @@
       "profileUpdated": "Perfil editado",
       "passwordChanged": "Contraseña cambiada",
       "accountDeleted": "Cuenta propia eliminada",
-      "sessionsRevoked": "{count, plural, one {# sesión cerrada} other {# sesiones cerradas}}"
+      "sessionsRevoked": "{count, plural, one {# sesión cerrada} other {# sesiones cerradas}}",
+      "telemetryEnabled": "Telemetría activada",
+      "telemetryDisabled": "Telemetría desactivada",
+      "telemetrySent": "Telemetría enviada manualmente",
+      "telemetrySendFailed": "Error al enviar la telemetría manualmente",
+      "telemetryAutoSent": "Telemetría enviada automáticamente",
+      "telemetryAutoSendFailed": "Error al enviar la telemetría automáticamente"
     }
   },
   "adminUsers": {
@@ -1248,5 +1279,18 @@
     "deleteConfirm": "Este campo se eliminará. Se perderán los valores en {shifts} turnos y {presets} plantillas.",
     "saveFailed": "No se pudo guardar el campo",
     "deleteFailed": "No se pudo eliminar el campo"
+  },
+  "telemetry": {
+    "consent": {
+      "title": "¿Enviar datos de diagnóstico anónimos?",
+      "description": "BetterShift puede enviar datos de uso anónimos al proyecto una vez al día. Esto ayuda a decidir qué funciones mantener y qué entornos necesitan compatibilidad.",
+      "pointAnonymous": "Sin nombres, direcciones, correos electrónicos ni contenido de calendarios",
+      "pointBuckets": "Los tamaños solo se indican como rango, por ejemplo «6-20 usuarios»",
+      "pointRevocable": "Revocable en cualquier momento desde el panel de administración",
+      "previewToggle": "Mostrar vista previa de los datos a enviar",
+      "docsLink": "Documentación completa",
+      "accept": "Enviar",
+      "decline": "No enviar"
+    }
   }
 }
